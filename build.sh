@@ -38,8 +38,14 @@ Build all kiss radio firmwares
 $ sh build.sh build-kiss-radio-firmwares
 
 Environment Variables:
+  FIRMWARE_VERSION: Required. The version string baked into the firmware, e.g: v1.0.0
   DISABLE_DEBUG=1: Disables all debug logging flags (MESH_DEBUG, MESH_PACKET_LOGGING, etc.)
                    If not set, debug flags from variant platformio.ini files are used.
+  BLE_PIN_CODE=<6 digits>: Overrides the BLE pin code set by the variant platformio.ini files.
+                   Applied to every BLE capable target, including boards with a screen, which
+                   use the given pin instead of generating a random one on each boot. Targets
+                   built without BLE are unaffected. If not set, the pin from the variant
+                   files is used, and boards with a screen keep generating a pin per boot.
 
 Examples:
 Build without debug logging:
@@ -50,6 +56,11 @@ $ sh build.sh build-firmware RAK_4631_repeater
 Build with debug logging (default, uses flags from variant files):
 $ export FIRMWARE_VERSION=v1.0.0
 $ sh build.sh build-firmware RAK_4631_repeater
+
+Build with a custom static BLE pin code:
+$ export FIRMWARE_VERSION=v1.0.0
+$ export BLE_PIN_CODE=987654
+$ sh build.sh build-firmware RAK_4631_companion_radio_ble
 EOF
 }
 
@@ -72,6 +83,11 @@ esac
 
 # cache project config json for use in get_platform_for_env()
 PIO_CONFIG_JSON=$(pio project config --json-output)
+
+# remember the build flags provided by the environment, so per target flags added
+# by build_firmware() don't accumulate when building more than one target
+PLATFORMIO_BUILD_FLAGS_BASE="${PLATFORMIO_BUILD_FLAGS}"
+PLATFORMIO_BUILD_UNFLAGS_BASE="${PLATFORMIO_BUILD_UNFLAGS}"
 
 # $1 should be the string to find (case insensitive)
 get_pio_envs_containing_string() {
@@ -114,6 +130,63 @@ for section, options in data:
 "
 }
 
+# get the BLE pin code a given environment builds with, as set by the variant
+# platformio.ini files. prints nothing for targets that don't define one.
+# $1 should be the environment name
+get_ble_pin_code_for_env() {
+  local env_name=$1
+  printf '%s' "$PIO_CONFIG_JSON" | python3 -c "
+import sys, json, re
+data = json.load(sys.stdin)
+for section, options in data:
+    if section == 'env:$env_name':
+        for key, value in options:
+            if key == 'build_flags':
+                for flag in value:
+                    match = re.search(r'-D\s*BLE_PIN_CODE\s*=\s*(\S+)', flag)
+                    if match:
+                        print(match.group(1))
+                        sys.exit(0)
+"
+}
+
+# override the static BLE pin code if BLE_PIN_CODE is set
+# $1 should be the environment name
+override_ble_pin_code() {
+  if [ -z "$BLE_PIN_CODE" ]; then
+    return
+  fi
+
+  # the BLE pairing passkey is always 6 digits
+  if [[ ! "$BLE_PIN_CODE" =~ ^[0-9]{6}$ ]]; then
+    echo "BLE_PIN_CODE must be a 6 digit number, got: $BLE_PIN_CODE"
+    exit 1
+  fi
+
+  # targets without a BLE pin code have no BLE interface at all, defining one
+  # here would change what gets compiled into them, so leave them alone
+  CURRENT_BLE_PIN_CODE=$(get_ble_pin_code_for_env $1)
+  if [ -z "$CURRENT_BLE_PIN_CODE" ]; then
+    echo "BLE_PIN_CODE is set, but $1 does not use a BLE pin code, skipping override"
+    return
+  fi
+
+  # drop the pin set by the variant build flags, then define the requested one.
+  # note: -UBLE_PIN_CODE can't be used here, platformio passes unflags to the
+  # compiler after all of the defines, which would undefine the new pin too.
+  # when the pins match there is nothing to swap, and unflagging would remove
+  # both copies of the define, leaving the target with no pin at all.
+  if [ "$CURRENT_BLE_PIN_CODE" != "$BLE_PIN_CODE" ]; then
+    export PLATFORMIO_BUILD_UNFLAGS="${PLATFORMIO_BUILD_UNFLAGS_BASE} -DBLE_PIN_CODE=${CURRENT_BLE_PIN_CODE}"
+    export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DBLE_PIN_CODE=${BLE_PIN_CODE}"
+  fi
+
+  # boards with a screen generate a random pin on each boot rather than using
+  # the pin from the variant build flags. this tells them to use the pin asked
+  # for here instead.
+  export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DBLE_PIN_CODE_STATIC=1"
+}
+
 # disable all debug logging flags if DISABLE_DEBUG=1 is set
 disable_debug_flags() {
   if [ "$DISABLE_DEBUG" == "1" ]; then
@@ -147,7 +220,11 @@ build_firmware() {
   FIRMWARE_FILENAME="$1-${FIRMWARE_VERSION_STRING}"
 
   # add firmware version info to end of existing platformio build flags in environment vars
-  export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFIRMWARE_BUILD_DATE='\"${FIRMWARE_BUILD_DATE}\"' -DFIRMWARE_VERSION='\"${FIRMWARE_VERSION_STRING}\"'"
+  export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS_BASE} -DFIRMWARE_BUILD_DATE='\"${FIRMWARE_BUILD_DATE}\"' -DFIRMWARE_VERSION='\"${FIRMWARE_VERSION_STRING}\"'"
+  export PLATFORMIO_BUILD_UNFLAGS="${PLATFORMIO_BUILD_UNFLAGS_BASE}"
+
+  # override the static BLE pin code if requested
+  override_ble_pin_code $1
 
   # disable debug flags if requested
   disable_debug_flags

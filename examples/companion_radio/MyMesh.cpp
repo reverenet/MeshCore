@@ -950,7 +950,9 @@ void MyMesh::begin(bool has_display) {
 
 #ifdef BLE_PIN_CODE // 123456 by default
   if (_prefs.ble_pin == 0) {
-#ifdef DISPLAY_CLASS
+// BLE_PIN_CODE_STATIC means the pin was explicitly asked for at build time,
+// so use it as-is, even on boards that would otherwise generate a pin
+#if defined(DISPLAY_CLASS) && !defined(BLE_PIN_CODE_STATIC)
     if (has_display && BLE_PIN_CODE == 123456) {
       StdRNG rng;
       _active_ble_pin = rng.nextInt(100000, 999999); // random pin each session
