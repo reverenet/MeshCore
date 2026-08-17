@@ -483,7 +483,17 @@ bool MyMesh::filterRecvFloodPacket(mesh::Packet* packet) {
 }
 
 bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
-  return _prefs.isRepeatEn();
+  if (!_prefs.isRepeatEn()) return false;
+
+  // Cap advert hops the way the repeater and room server already do. Without this a
+  // repeat-enabled companion extends an advert's path until it hits MAX_PATH_SIZE, and
+  // the resulting packet no longer fits an advert blob record - putBlobByKey() just
+  // returns false, so "Share contact" silently stops working for distant nodes.
+  if (packet->isRouteFlood() && packet->getPayloadType() == PAYLOAD_TYPE_ADVERT
+      && packet->getPathHashCount() >= FLOOD_MAX_ADVERT) {
+    return false;
+  }
+  return true;
 }
 
 void MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis) {
@@ -591,6 +601,17 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
 
 void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *pkt, uint16_t data_type,
                                const uint8_t *data, size_t data_len) {
+#ifdef TRACKING_KEY
+  // Intercept before anything reaches the app. A position report must never be
+  // forwarded up as channel data, or the client would surface an unreadable message
+  // on a channel the user never configured.
+  if (data_type == POSITION_REPORT_DATA_TYPE
+      && memcmp(channel.secret, _track_channel.secret, sizeof(_track_channel.secret)) == 0) {
+    handleTrackReport(data, data_len);
+    return;
+  }
+#endif
+
   if (data_len > MAX_CHANNEL_DATA_LENGTH) {
     MESH_DEBUG_PRINTLN("onChannelDataRecv: dropping payload_len=%d exceeds frame limit=%d",
                        (uint32_t)data_len, (uint32_t)MAX_CHANNEL_DATA_LENGTH);
@@ -883,10 +904,13 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.bw = LORA_BW;
   _prefs.cr = LORA_CR;
   _prefs.tx_power_dbm = LORA_TX_POWER;
-  _prefs.gps_enabled = 0;       // GPS disabled by default
-  _prefs.gps_interval = 0;      // No automatic GPS updates by default
+
+  _prefs.gps_enabled = GPS_ENABLED;    // see AutoAdvert.h; on unless the build says otherwise
+  _prefs.gps_interval = GPS_INTERVAL;  // 0 leaves the sensor manager's own cadence alone
+  _prefs.advert_loc_policy = AUTO_ADVERT_LOC_POLICY;   // NONE unless the location beacon is built in
   _prefs.radio_fem_rxgain = 1;
   _prefs.radio_fem_txgain = 0;
+
   //_prefs.rx_delay_base = 10.0f;  enable once new algo fixed
   _prefs.setRepeatEn(false);
 #if defined(USE_SX1262) || defined(USE_SX1268)
@@ -913,7 +937,10 @@ void MyMesh::begin(bool has_display) {
 
 // if name is provided as a build flag, use that as default node name instead
 #ifdef ADVERT_NAME
-  strcpy(_prefs.node_name, ADVERT_NAME);
+  // truncate rather than strcpy: node_name is a 32 byte field in the middle of the prefs
+  // struct, so an over-long build flag would run straight into the fields after it. The
+  // repeater, room server and sensor all bound this the same way.
+  StrHelper::strncpy(_prefs.node_name, ADVERT_NAME, sizeof(_prefs.node_name));
 #else
   // use hex of first 4 bytes of identity public key as default node name
   char pub_key_hex[10];
@@ -982,6 +1009,29 @@ void MyMesh::begin(bool has_display) {
   board.setLoRaFemPaGainEnabled(_prefs.radio_fem_txgain);
   MESH_DEBUG_PRINTLN("RX Boosted Gain Mode: %s",
                      radio_driver.getRxBoostedGainMode() ? "Enabled" : "Disabled");
+
+  {
+    AdvertScheduler::Config cfg;
+    cfg.min_interval_secs = AUTO_ADVERT_LOC_MIN_SECS;
+    cfg.max_interval_secs = AUTO_ADVERT_LOC_MAX_SECS;
+    cfg.dist_threshold_m = AUTO_ADVERT_LOC_DIST_M;
+    cfg.backoff_factor = AUTO_ADVERT_LOC_BACKOFF;
+    cfg.jitter_pct = AUTO_ADVERT_LOC_JITTER_PCT;
+    cfg.startup_spread_secs = AUTO_ADVERT_LOC_STARTUP_SECS;
+
+    // seed from the public key, NOT from millis(): a fleet powering up together draws
+    // near-identical millis() values, which would leave every node's jitter correlated
+    // and defeat the whole point of it.
+    uint32_t seed;
+    memcpy(&seed, self_id.pub_key, sizeof(seed));
+    _loc_sched.begin(cfg, millis(), seed);
+  }
+  _next_plain_advert = futureMillis((uint32_t)AUTO_ADVERT_SECS * 1000);
+  _next_loc_poll = futureMillis(1000);
+
+#ifdef TRACKING_KEY
+  initTracking();
+#endif
 }
 
 const char *MyMesh::getNodeName() {
@@ -2243,24 +2293,315 @@ void MyMesh::loop() {
     dirty_contacts_expiry = 0;
   }
 
+  checkAutoAdverts();
+#ifdef TRACKING_KEY
+  checkTracking();
+#endif
+
 #ifdef DISPLAY_CLASS
   if (_ui) _ui->setHasConnection(_serial->isConnected());
 #endif
 }
 
 bool MyMesh::advert() {
+  return sendAdvert(_prefs.advert_loc_policy != ADVERT_LOC_NONE, false);
+}
+
+// Returns false when there is nothing trustworthy to send, so a node never beacons a
+// position it doesn't actually have. sensors.node_lat/lon is the single source of truth
+// here - begin() seeds it from prefs, and savePrefs() writes it back.
+// Do we have a position worth transmitting at all? sensors.node_lat/lon is the single
+// source of truth: begin() seeds it from prefs, and savePrefs() writes it back.
+bool MyMesh::hasUsableLocation(double& lat, double& lon) const {
+  lat = sensors.node_lat;
+  lon = sensors.node_lon;
+
+  // A live fix is trustworthy. Otherwise fall back to "is there a position at all",
+  // which keeps a manually configured location working on boards that have a GPS
+  // provider fitted but no fix - rejecting only null island, which is what an un-fixed
+  // receiver reports.
+  LocationProvider* provider = sensors.getLocationProvider();
+  if (provider != NULL && provider->isValid()) return true;
+
+  return !(lat == 0 && lon == 0);
+}
+
+// Position to put in an ADVERT, which every node in radio range can read.
+bool MyMesh::getAdvertLocation(double& lat, double& lon) const {
+  if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) return false;
+  return hasUsableLocation(lat, lon);
+}
+
+// Position for a TRACKING report, which only holders of the tracking key can read.
+//
+// Deliberately not gated on advert_loc_policy. That setting answers a different
+// question - whether a position rides along in adverts, which are public to the whole
+// mesh - and tracking exists precisely so a node can tell its own group where it is
+// without broadcasting that to everyone. Gating this on it meant a node built for
+// tracking, with the policy at its NONE default, silently sampled nothing and
+// transmitted nothing, with both ends looking perfectly healthy.
+bool MyMesh::getTrackingLocation(double& lat, double& lon) const {
+  return hasUsableLocation(lat, lon);
+}
+
+bool MyMesh::sendAdvert(bool with_location, bool flood) {
   mesh::Packet* pkt;
-  if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) {
+  double lat, lon;
+
+  if (with_location && getAdvertLocation(lat, lon)) {
+    pkt = createSelfAdvert(_prefs.node_name, lat, lon);
+  } else {
     pkt = createSelfAdvert(_prefs.node_name);
-  } else {
-    pkt = createSelfAdvert(_prefs.node_name, sensors.node_lat, sensors.node_lon);
   }
-  if (pkt) {
-    sendZeroHop(pkt);
-    return true;
+  if (pkt == NULL) return false;   // pool empty, or encryption configured but failed
+
+  if (flood) {
+    TransportKey scope;
+    memcpy(&scope.key, _prefs.default_scope_key, sizeof(scope.key));
+    sendFloodScoped(scope, pkt, 0);
   } else {
+    sendZeroHop(pkt);
+  }
+  return true;
+}
+
+#ifdef TRACKING_KEY
+
+void MyMesh::initTracking() {
+  // Derive a channel from the tracking key. It lives here rather than in channels[],
+  // so getChannel()/getChannelForSave() never return it and the app never lists it.
+  mesh::Utils::sha256(_track_channel.secret, sizeof(_track_channel.secret),
+                      (const uint8_t*)TRACKING_KEY, strlen(TRACKING_KEY));
+  mesh::Utils::sha256(_track_channel.hash, sizeof(_track_channel.hash),
+                      _track_channel.secret, 32);
+
+  AdvertScheduler::Config cfg;
+  cfg.min_interval_secs = TRACK_SAMPLE_MIN_SECS;
+  cfg.max_interval_secs = TRACK_SAMPLE_MAX_SECS;
+  cfg.dist_threshold_m = TRACK_SAMPLE_DIST_M;
+  cfg.backoff_factor = 2;
+  cfg.jitter_pct = 0;              // sampling cadence is private; only TX timing is observable
+  cfg.startup_spread_secs = 0;
+
+  uint32_t seed;
+  memcpy(&seed, self_id.pub_key, sizeof(seed));
+  _track_sampler.begin(cfg, millis(), seed ^ 0x54524B31);
+
+  _track_count = 0;
+  _track_seen_count = 0;
+  _next_track_poll = futureMillis(1000);
+  // stagger the first report so a fleet doesn't transmit in lockstep
+  _next_track_report = futureMillis((uint32_t)(seed % TRACK_REPORT_SECS) * 1000);
+}
+
+// Matched IN ADDITION to the user's channels, so tracking traffic decrypts without
+// ever appearing in the app's channel list.
+int MyMesh::searchChannelsByHash(const uint8_t* hash, mesh::GroupChannel dest[], int max_matches) {
+  int n = 0;
+  if (max_matches > 0 && _track_channel.hash[0] == hash[0]) {
+    dest[n++] = _track_channel;
+  }
+  if (n < max_matches) {
+    n += BaseChatMesh::searchChannelsByHash(hash, &dest[n], max_matches - n);
+  }
+  return n;
+}
+
+// Per-reporter watermark, kept in RAM rather than in ContactInfo so that the persisted
+// contact format is unchanged. Losing it over a reboot costs nothing: the worst case is
+// that one stale report is accepted once, and the next live one corrects it.
+bool MyMesh::isNewerTrackReport(const uint8_t* prefix, uint32_t timestamp) {
+  for (int i = 0; i < _track_seen_count; i++) {
+    if (memcmp(_track_seen[i].prefix, prefix, POS_PREFIX_LEN) == 0) {
+      if (timestamp <= _track_seen[i].newest) return false;
+      _track_seen[i].newest = timestamp;
+      return true;
+    }
+  }
+
+  if (_track_seen_count < TRACK_PEERS) {
+    memcpy(_track_seen[_track_seen_count].prefix, prefix, POS_PREFIX_LEN);
+    _track_seen[_track_seen_count].newest = timestamp;
+    _track_seen_count++;
+  } else {
+    // table full: evict whichever entry we last heard from longest ago
+    int oldest = 0;
+    for (int i = 1; i < TRACK_PEERS; i++) {
+      if (_track_seen[i].newest < _track_seen[oldest].newest) oldest = i;
+    }
+    memcpy(_track_seen[oldest].prefix, prefix, POS_PREFIX_LEN);
+    _track_seen[oldest].newest = timestamp;
+  }
+  return true;
+}
+
+bool MyMesh::handleTrackReport(const uint8_t* data, size_t data_len) {
+  uint8_t prefix[POS_PREFIX_LEN];
+  PositionSample samples[PositionReport::capacityFor(MAX_GROUP_DATA_LENGTH)];
+
+  if (data_len <= POS_NONCE_LEN) {
+    MESH_DEBUG_PRINTLN("handleTrackReport: runt report, len=%d", (uint32_t)data_len);
     return false;
   }
+
+  // Undo the whitening before anything tries to parse it. A report from a build that
+  // predates the nonce de-whitens into noise, and is rejected by decode()'s version
+  // check - which is the same answer as "wrong key", and the right one either way.
+  uint8_t plain[MAX_GROUP_DATA_LENGTH];
+  size_t plain_len = data_len - POS_NONCE_LEN;
+  if (plain_len > sizeof(plain)) return false;
+  memcpy(plain, data + POS_NONCE_LEN, plain_len);
+  PositionReport::whiten(_track_channel.secret, data, plain, plain_len);
+
+  int num = PositionReport::decode(plain, plain_len, prefix, samples, (int)(sizeof(samples)/sizeof(samples[0])));
+  if (num <= 0) {
+    MESH_DEBUG_PRINTLN("handleTrackReport: malformed report, len=%d", (uint32_t)data_len);
+    return false;
+  }
+
+  if (memcmp(prefix, self_id.pub_key, POS_PREFIX_LEN) == 0) return true;  // our own, echoed back
+
+  ContactInfo* from = lookupContactByPubKey(prefix, POS_PREFIX_LEN);
+  if (from == NULL) {
+    // We only track nodes we already know. An unknown reporter has no contact record to
+    // attach a position to, and fabricating one would surface a nameless entry in the app.
+    MESH_DEBUG_PRINTLN("handleTrackReport: no contact for reporter");
+    return true;   // handled: still must not reach the app
+  }
+
+  const PositionSample& newest = samples[num - 1];
+
+  // Ignore a report older than the last one from this node, so a replayed or
+  // late-arriving batch can't drag a contact backwards.
+  //
+  // This MUST NOT use contact.last_advert_timestamp. That field is the advert replay
+  // watermark (BaseChatMesh::onAdvertRecv rejects any advert at or below it), and it
+  // moves every time an advert arrives - which is often. Comparing against it dropped
+  // essentially every report, because a node's adverts are newer than the samples
+  // batched up before them; writing to it was worse still, since a report from the
+  // future would then make that node's genuine adverts look like replays.
+  if (!isNewerTrackReport(prefix, newest.timestamp)) return true;
+
+  from->gps_lat = newest.lat_e6;
+  from->gps_lon = newest.lon_e6;
+  from->lastmod = getRTCClock()->getCurrentTime();
+
+  // The app picks this up through the contact sync it already does - it sees the
+  // contact's position change exactly as it would after an advert.
+  dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
+  return true;
+}
+
+void MyMesh::checkTracking() {
+#if TRACK_REPORT
+  if (millisHasNowPassed(_next_track_poll)) {
+    _next_track_poll = futureMillis(1000);
+
+    double lat, lon;
+    bool valid = getTrackingLocation(lat, lon);
+    if (_track_sampler.poll(millis(), valid,
+                            (int32_t)(lat * 1000000.0), (int32_t)(lon * 1000000.0))
+          != AdvertScheduler::REASON_NONE) {
+      if (_track_count >= TRACK_BUFFER) {   // backlog full: drop the oldest sample
+        memmove(&_track_buf[0], &_track_buf[1], sizeof(PositionSample) * (TRACK_BUFFER - 1));
+        _track_count = TRACK_BUFFER - 1;
+      }
+      PositionSample& s = _track_buf[_track_count++];
+      s.timestamp = getRTCClock()->getCurrentTime();
+      s.lat_e6 = (int32_t)(lat * 1000000.0);
+      s.lon_e6 = (int32_t)(lon * 1000000.0);
+    }
+  }
+
+  // Fixed cadence, regardless of whether we moved. That is the whole point: airtime
+  // must not correlate with motion, or the timing alone reveals who is moving.
+  if (millisHasNowPassed(_next_track_report)) {
+    _next_track_report = futureMillis((uint32_t)TRACK_REPORT_SECS * 1000);
+    flushTrackReport();
+  }
+#endif
+}
+
+void MyMesh::flushTrackReport() {
+  if (_track_count == 0) {
+    // Nothing new to say. Still send our current position if we have one, so the
+    // transmission rate stays flat and says nothing about whether we are moving.
+    double lat, lon;
+    if (!getTrackingLocation(lat, lon)) return;
+    _track_buf[0].timestamp = getRTCClock()->getCurrentTime();
+    _track_buf[0].lat_e6 = (int32_t)(lat * 1000000.0);
+    _track_buf[0].lon_e6 = (int32_t)(lon * 1000000.0);
+    _track_count = 1;
+  }
+
+  uint8_t blob[MAX_GROUP_DATA_LENGTH];
+  int i = 0;
+  blob[i++] = (uint8_t)(POSITION_REPORT_DATA_TYPE & 0xFF);
+  blob[i++] = (uint8_t)(POSITION_REPORT_DATA_TYPE >> 8);
+  int len_pos = i++;
+  uint8_t* nonce = &blob[i]; i += POS_NONCE_LEN;   // in the clear: the receiver needs it
+
+  int consumed = 0;
+  int n = PositionReport::encode(&blob[i], sizeof(blob) - i, self_id.pub_key,
+                                 _track_buf, _track_count, &consumed);
+  if (n <= 0) { _track_count = 0; return; }
+
+  // The length byte has to cover everything the receiver is handed, which is the nonce as
+  // well as the report - BaseChatMesh passes on exactly this many bytes and no more.
+  blob[len_pos] = (uint8_t)(POS_NONCE_LEN + n);
+
+  // Whiten the report so the channel's ECB blocks differ even when the position does not
+  // - see PositionReport.h. The nonce covers the report only; the type and length bytes
+  // ahead of it are the same in every tracking packet anyway.
+  PositionReport::deriveNonce(_track_channel.secret, &blob[i], n, nonce);
+  PositionReport::whiten(_track_channel.secret, nonce, &blob[i], n);
+
+  mesh::Packet* pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_DATA, _track_channel, blob, i + n);
+  if (pkt == NULL) return;   // pool empty: keep the backlog and try again next cadence
+
+#if TRACK_FLOOD
+  {
+    TransportKey scope;
+    memcpy(&scope.key, _prefs.default_scope_key, sizeof(scope.key));
+    sendFloodScoped(scope, pkt, 0);
+  }
+#else
+  sendZeroHop(pkt);
+#endif
+
+  // retain anything that didn't fit, so a long backlog drains over several reports
+  if (consumed >= _track_count) {
+    _track_count = 0;
+  } else {
+    memmove(&_track_buf[0], &_track_buf[consumed], sizeof(PositionSample) * (_track_count - consumed));
+    _track_count -= consumed;
+  }
+}
+#endif   // TRACKING_KEY
+
+void MyMesh::checkAutoAdverts() {
+#if AUTO_ADVERT_SECS > 0
+  if (millisHasNowPassed(_next_plain_advert)) {
+    sendAdvert(false, AUTO_ADVERT_FLOOD);
+    _next_plain_advert = futureMillis((uint32_t)AUTO_ADVERT_SECS * 1000);
+  }
+#endif
+
+#if AUTO_ADVERT_LOC
+  // the scheduler is cheap, but there's no reason to run it faster than once a second
+  if (millisHasNowPassed(_next_loc_poll)) {
+    _next_loc_poll = futureMillis(1000);
+
+    double lat, lon;
+    bool valid = getAdvertLocation(lat, lon);
+    AdvertScheduler::Reason why = _loc_sched.poll(millis(), valid,
+                                                  (int32_t)(lat * 1000000.0),
+                                                  (int32_t)(lon * 1000000.0));
+    if (why != AdvertScheduler::REASON_NONE) {
+      sendAdvert(true, AUTO_ADVERT_LOC_FLOOD);
+    }
+  }
+#endif
 }
 
 // To check if there is pending work

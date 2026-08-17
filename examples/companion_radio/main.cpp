@@ -14,6 +14,7 @@ static uint32_t _atoi(const char* sp) {
 
 // interface manager
 #include <helpers/MultiSerialInterface.h>
+#include <helpers/FlashErase.h>
 MultiSerialInterface interface_manager;
 
 // include bluetooth interface
@@ -116,6 +117,23 @@ void halt() {
 void setup() {
   Serial.begin(115200);
   board.begin();
+
+#ifdef FLASH_ERASE_BUILD
+  // built by 'make erase-firmware'; never returns
+  {
+    bool ok = flash_erase_primary();
+    // contacts and channels live on a second filesystem on the boards that have one, and
+    // formatting the internal one leaves it completely untouched - so wipe it too, or a
+    // "cleaned" device comes back up still holding its old contact list
+    #if defined(QSPIFLASH)
+      if (QSPIFlash.begin()) { ok = QSPIFlash.format() && ok; }
+    #elif defined(EXTRAFS)
+      ExtraFS.begin();
+      ok = ExtraFS.format() && ok;
+    #endif
+    flash_erase_halt(ok);
+  }
+#endif
 
 #ifdef HAS_EXTERNAL_WATCHDOG
   external_watchdog.begin();

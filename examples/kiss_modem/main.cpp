@@ -3,6 +3,7 @@
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/IdentityStore.h>
 #include "KissModem.h"
+#include <helpers/FlashErase.h>
 
 #if defined(NRF52_PLATFORM)
   #include <InternalFileSystem.h>
@@ -77,6 +78,10 @@ void onGetStats(uint32_t* rx, uint32_t* tx, uint32_t* errors) {
 
 void setup() {
   board.begin();
+
+#ifdef FLASH_ERASE_BUILD
+  flash_erase_halt(flash_erase_primary());   // built by 'make erase-firmware'; never returns
+#endif
 
   if (!radio_init()) {
     halt();

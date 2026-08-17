@@ -22,6 +22,15 @@
 #ifndef ADVERT_NAME
   #define ADVERT_NAME "repeater"
 #endif
+// A repeater is normally a fixed installation whose position is set once, by hand, so
+// its GPS stays off unless a build asks for it. The companion defaults the other way -
+// see examples/companion_radio/AutoAdvert.h.
+#ifndef GPS_ENABLED
+  #define GPS_ENABLED 0
+#endif
+#ifndef GPS_INTERVAL
+  #define GPS_INTERVAL 0
+#endif
 #ifndef ADVERT_LAT
   #define ADVERT_LAT 0.0
 #endif
@@ -918,8 +927,8 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   StrHelper::strncpy(_prefs.bridge_secret, "LVSITANOS", sizeof(_prefs.bridge_secret));
 
   // GPS defaults
-  _prefs.gps_enabled = 0;
-  _prefs.gps_interval = 0;
+  _prefs.gps_enabled = GPS_ENABLED;
+  _prefs.gps_interval = GPS_INTERVAL;
   _prefs.advert_loc_policy = ADVERT_LOC_PREFS;
 
   _prefs.adc_multiplier = 0.0f; // 0.0f means use default board multiplier
@@ -955,7 +964,38 @@ void MyMesh::begin(FILESYSTEM *fs) {
     if (r) {
       region_map.getTransportKeysFor(*r, &default_scope, 1);
     } else {
-#ifdef DEFAULT_FLOOD_SCOPE_NAME
+#if defined(DEFAULT_REGIONS)
+      // Comma-separated region names, e.g. "ma,newengland,us". A flood is only forwarded
+      // by a repeater that has the packet's region configured AND flood-enabled, and
+      // every repeater along a path needs the same ones - so for a network that spans
+      // several regions this belongs in the build rather than being retyped into each
+      // repeater's CLI.
+      //
+      // All of them are parented to the root. getTransportKeysFor() derives a region's
+      // key from its name alone and findMatch() scans the list flat, so the parent is
+      // presentation only and nesting them here would buy nothing.
+      char names[] = DEFAULT_REGIONS;
+      char* p = names;
+      while (*p) {
+        char* sep = strchr(p, ',');
+        if (sep) { *sep = 0; }
+
+        if (*p) {
+          RegionEntry* e = region_map.findByName(p);
+          if (e == NULL) { e = region_map.putRegion(p, 0); }
+          if (e) {
+            e->flags = 0;   // Allow-flood
+            if (r == NULL) { r = e; }   // the first name is the scope we originate in
+          }
+        }
+        if (sep == NULL) break;
+        p = sep + 1;
+      }
+      if (r) {
+        region_map.setDefaultRegion(r);
+        region_map.getTransportKeysFor(*r, &default_scope, 1);
+      }
+#elif defined(DEFAULT_FLOOD_SCOPE_NAME)
       r = region_map.findByName(DEFAULT_FLOOD_SCOPE_NAME);
       if (r == NULL) {
         r = region_map.putRegion(DEFAULT_FLOOD_SCOPE_NAME, 0);  // auto-create the default scope region

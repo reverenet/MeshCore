@@ -41,6 +41,7 @@
 #endif
 
 #include <helpers/BaseChatMesh.h>
+#include <helpers/FlashErase.h>
 
 #define SEND_TIMEOUT_BASE_MILLIS          500
 #define FLOOD_SEND_TIMEOUT_FACTOR         16.0f
@@ -557,6 +558,10 @@ void halt() {
 
 void setup() {
   Serial.begin(115200);
+
+#ifdef FLASH_ERASE_BUILD
+  flash_erase_halt(flash_erase_primary());   // built by 'make erase-firmware'; never returns
+#endif
 
   board.begin();
 

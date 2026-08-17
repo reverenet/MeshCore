@@ -415,7 +415,10 @@ Packet* Mesh::createAdvert(const LocalIdentity& id, const uint8_t* app_data, siz
   int len = 0;
   memcpy(&packet->payload[len], id.pub_key, PUB_KEY_SIZE); len += PUB_KEY_SIZE;
 
-  uint32_t emitted_timestamp = _rtc->getCurrentTime();
+  // NOTE: must be Unique(), not getCurrentTime(). Two adverts emitted in the same
+  // second would otherwise carry identical timestamps, and receivers discard the
+  // second as a replay (see BaseChatMesh::onAdvertRecv).
+  uint32_t emitted_timestamp = _rtc->getCurrentTimeUnique();
   memcpy(&packet->payload[len], &emitted_timestamp, 4); len += 4;
 
   uint8_t* signature = &packet->payload[len]; len += SIGNATURE_SIZE;  // will fill this in later

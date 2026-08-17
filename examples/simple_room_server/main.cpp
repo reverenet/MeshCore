@@ -2,6 +2,7 @@
 #include <Mesh.h>
 
 #include "MyMesh.h"
+#include <helpers/FlashErase.h>
 
 #ifdef ETHERNET_ENABLED
   #define ETHERNET_CLI_BANNER "MeshCore Room Server CLI"
@@ -28,6 +29,10 @@ static char ethernet_command[MAX_POST_TEXT_LEN+1];
 
 void setup() {
   Serial.begin(115200);
+
+#ifdef FLASH_ERASE_BUILD
+  flash_erase_halt(flash_erase_primary());   // built by 'make erase-firmware'; never returns
+#endif
   delay(1000);
 
   board.begin();

@@ -2,7 +2,10 @@
 
 #include <Arduino.h>
 #include <Mesh.h>
+#include <helpers/AdvertScheduler.h>
+#include <helpers/PositionReport.h>
 #include "AbstractUITask.h"
+#include "AutoAdvert.h"
 
 /*------------ Frame Protocol --------------*/
 #define FIRMWARE_VER_CODE 13
@@ -112,6 +115,9 @@ protected:
   uint8_t getExtraAckTransmitCount() const override;
   bool filterRecvFloodPacket(mesh::Packet* packet) override;
   bool allowPacketForward(const mesh::Packet* packet) override;
+#ifdef TRACKING_KEY
+  int searchChannelsByHash(const uint8_t* hash, mesh::GroupChannel dest[], int max_matches) override;
+#endif
 
   void sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis);
   void sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt, uint32_t delay_millis=0) override;
@@ -203,6 +209,39 @@ private:
   void checkCLIRescueCmd();
   void checkSerialInterface();
   bool isValidClientRepeatFreq(uint32_t f) const;
+
+  // automatic advert scheduling
+  bool hasUsableLocation(double& lat, double& lon) const;   // false when we have no usable fix
+  bool getAdvertLocation(double& lat, double& lon) const;   // + the advert sharing policy
+  bool getTrackingLocation(double& lat, double& lon) const; // NOT subject to that policy
+  bool sendAdvert(bool with_location, bool flood);
+  void checkAutoAdverts();
+
+  AdvertScheduler _loc_sched;
+  unsigned long _next_plain_advert;
+  unsigned long _next_loc_poll;
+
+#ifdef TRACKING_KEY
+  // position tracking (see AutoAdvert.h)
+  void initTracking();
+  void checkTracking();
+  void flushTrackReport();
+  bool handleTrackReport(const uint8_t* data, size_t data_len);
+  bool isNewerTrackReport(const uint8_t* prefix, uint32_t timestamp);
+
+  mesh::GroupChannel _track_channel;   // deliberately NOT in channels[], so the app never lists it
+  AdvertScheduler _track_sampler;
+  PositionSample _track_buf[TRACK_BUFFER];
+  int _track_count;
+
+  // newest report seen per reporter, so a replay can't move a contact backwards. NOT
+  // ContactInfo::last_advert_timestamp - that one belongs to advert replay detection.
+  struct TrackWatermark { uint8_t prefix[POS_PREFIX_LEN]; uint32_t newest; };
+  TrackWatermark _track_seen[TRACK_PEERS];
+  int _track_seen_count;
+  unsigned long _next_track_report;
+  unsigned long _next_track_poll;
+#endif
 
   // helpers, short-cuts
   void saveChannels() { _store->saveChannels(this); }

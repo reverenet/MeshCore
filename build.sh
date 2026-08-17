@@ -12,6 +12,8 @@ Commands:
   help|usage|-h|--help: Shows this message.
   list|-l: List firmwares available to build.
   build-firmware <target>: Build the firmware for the given build target.
+  flash-firmware <target>: Build the firmware, then upload it to a connected device.
+                           Set PLATFORMIO_UPLOAD_PORT to pick a port when several are attached.
   build-firmwares: Build all firmwares for all targets.
   build-matching-firmwares <build-match-spec>: Build all firmwares for build targets containing the string given for <build-match-spec>.
   build-companion-firmwares: Build all companion firmwares for all build targets.
@@ -88,6 +90,12 @@ PIO_CONFIG_JSON=$(pio project config --json-output)
 # by build_firmware() don't accumulate when building more than one target
 PLATFORMIO_BUILD_FLAGS_BASE="${PLATFORMIO_BUILD_FLAGS}"
 PLATFORMIO_BUILD_UNFLAGS_BASE="${PLATFORMIO_BUILD_UNFLAGS}"
+
+# extra targets appended to the 'pio run' that build_firmware() performs, e.g. "-t upload".
+# Flashing goes through the same function as building on purpose: pio would otherwise
+# rebuild with whatever flags happened to be set, and quietly upload a different binary
+# from the one 'build-firmware' just produced.
+PIO_RUN_TARGETS=""
 
 # $1 should be the string to find (case insensitive)
 get_pio_envs_containing_string() {
@@ -229,8 +237,8 @@ build_firmware() {
   # disable debug flags if requested
   disable_debug_flags
 
-  # build firmware target
-  pio run -e $1
+  # build firmware target (and upload it too, when PIO_RUN_TARGETS says so)
+  pio run -e $1 $PIO_RUN_TARGETS
 
   # build merge-bin for esp32 fresh install, copy .bins to out folder (e.g: Heltec_v3_room_server-v1.0.0-SHA.bin)
   if [ "$ENV_PLATFORM" == "ESP32_PLATFORM" ]; then
@@ -352,6 +360,14 @@ if [[ $1 == "build-firmware" ]]; then
     done
   else
     echo "usage: $0 build-firmware <target>"
+    exit 1
+  fi
+elif [[ $1 == "flash-firmware" ]]; then
+  if [ "$2" ]; then
+    PIO_RUN_TARGETS="-t upload"
+    build_firmware $2
+  else
+    echo "usage: $0 flash-firmware <target>"
     exit 1
   fi
 elif [[ $1 == "build-matching-firmwares" ]]; then

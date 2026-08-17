@@ -2,6 +2,7 @@
 #include <Mesh.h>
 
 #include "MyMesh.h"
+#include <helpers/FlashErase.h>
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
@@ -37,6 +38,10 @@ static unsigned long userBtnDownAt = 0;
 
 void setup() {
   Serial.begin(115200);
+
+#ifdef FLASH_ERASE_BUILD
+  flash_erase_halt(flash_erase_primary());   // built by 'make erase-firmware'; never returns
+#endif
   delay(1000);
 
   board.begin();
