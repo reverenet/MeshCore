@@ -17,8 +17,9 @@ compile_commands.json
 .venv/
 venv/
 platformio.local.ini
-# advert/tracking keys, written by `make keys`. these are the network's shared secret
+# keys and the BLE pairing pin - the network's shared secrets, and never committed
 keys/
 *.key
+*.pin
 # erase images are downloaded per board, not built here - see the README in that dir
 tools/flash_erase/*.uf2
