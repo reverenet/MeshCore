@@ -2579,7 +2579,15 @@ void MyMesh::flushTrackReport() {
   int consumed = 0;
   int n = PositionReport::encode(&blob[i], sizeof(blob) - i, self_id.pub_key,
                                  _track_buf, _track_count, &consumed);
-  if (n <= 0) { _track_count = 0; return; }
+  if (n <= 0) {
+    // Keep the backlog. Encoding only fails when the budget is too small to hold even a
+    // header, which is a build-time property rather than something this batch did - so
+    // throwing the samples away would lose real positions to a condition that will be
+    // just as true next time. The buffer is bounded, and the oldest sample falls off it.
+    MESH_DEBUG_PRINTLN("flushTrackReport: no room to encode a report, keeping %d samples",
+                       (uint32_t)_track_count);
+    return;
+  }
 
   // The length byte has to cover everything the receiver is handed, which is the nonce as
   // well as the report - BaseChatMesh passes on exactly this many bytes and no more.

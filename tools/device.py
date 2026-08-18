@@ -502,12 +502,17 @@ def copy_to_volume(image, volume):
     except OSError as exc:
         expected = (errno.EIO, errno.ENOENT, errno.ENODEV, errno.EBUSY, errno.EINVAL)
         if written >= size and exc.errno in expected:
-            return True
+            return True   # the board rebooted on the last byte, which is the success case
         if written == 0:
             print(f"could not write to {volume}: {exc}", file=sys.stderr)
-            return False
-        print(f"the drive went away after {written} of {size} bytes - "
-              "if the board does not come back, copy the image again", file=sys.stderr)
+        else:
+            # Anything short of the whole image is a failed flash, however it ended. Say
+            # so: the caller goes on to reset and name the board, and a half-written image
+            # is exactly the state where that does more harm than stopping would.
+            print(f"only {written} of {size} bytes reached {volume} - the image is "
+                  "incomplete. put the board back into bootloader mode and try again.",
+                  file=sys.stderr)
+        return False
     return True
 
 
@@ -702,6 +707,18 @@ def cmd_send(args):
 IMAGE_EXTS = (".uf2", ".zip", "-merged.bin")
 
 
+def name_in_filename(filename, env):
+    """The device name a built image was filed under, or None if it is not one.
+
+    '' means an unnamed build. Shared with the plan, so that "is this the image built for
+    NAME" is answered by the same rule that filed it - the extensions are not uniform
+    ('-merged.bin' has a hyphen in it), so comparing against one suffix gets it wrong.
+    """
+    pattern = re.compile(rf"^{re.escape(env)}(?:@(.+))?({'|'.join(re.escape(e) for e in IMAGE_EXTS)})$")
+    match = pattern.match(filename)
+    return (match.group(1) or "") if match else None
+
+
 def image_candidates(binaries_dir, env, erase):
     """The images built for one env, one entry per name it was built under.
 
@@ -721,12 +738,11 @@ def image_candidates(binaries_dir, env, erase):
                 return [{"path": path, "env": env, "name": ""}]
         return []
 
-    pattern = re.compile(rf"^{re.escape(env)}(?:@(.+))?({'|'.join(re.escape(e) for e in IMAGE_EXTS)})$")
     by_name = {}
     for path in sorted(Path(binaries_dir).glob(f"{glob.escape(env)}*")):
-        match = pattern.match(path.name)
-        if match:
-            by_name.setdefault(match.group(1) or "", []).append(path)
+        name = name_in_filename(path.name, env)
+        if name is not None:
+            by_name.setdefault(name, []).append(path)
 
     found = []
     for name, paths in sorted(by_name.items()):
@@ -907,7 +923,8 @@ def cmd_plan(args):
         rows.append(("image", out["IMAGE"]))
     rows.append(("route", route))
     if args.name:
-        if out["IMAGE"].endswith(f"@{name_slug(args.name)}" + Path(out["IMAGE"]).suffix):
+        built_as = name_in_filename(Path(out["IMAGE"]).name, out["ENV"]) if out["ENV"] else None
+        if built_as is not None and built_as == name_slug(args.name):
             naming = f"{args.name!r} is already built into the image above"
         elif action == "build":
             naming = f"{args.name!r} compiled into the build as the name a fresh device starts with"

@@ -791,7 +791,7 @@ firmware-one:
 # named builds paying for a second full build each time. WITH_ERASE=1 rebuilds it anyway
 # (after a version bump, say), WITH_ERASE=0 skips it entirely.
 ifneq ($(WITH_ERASE),0)
-	@if [ "$(WITH_ERASE)" != "1" ] && ls $(BINARIES_DIR)/$(FIRMWARE)-erase.* >/dev/null 2>&1; then \
+	@if [ "$(WITH_ERASE)" != "1" ] && ls "$(BINARIES_DIR)"/$(FIRMWARE)-erase.* >/dev/null 2>&1; then \
 	   echo "erase image for $(FIRMWARE) is already in $(BINARIES_DIR) - keeping it (WITH_ERASE=1 rebuilds)"; \
 	 else \
 	   $(MAKE) --no-print-directory erase-firmware; \
