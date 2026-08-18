@@ -65,6 +65,18 @@ public:
    */
   void reset(uint32_t now_ms);
 
+  /**
+   * \brief  Take back the send that poll() just asked for, because it did not happen.
+   *
+   * poll() commits as it decides: it moves the distance reference to the position it is
+   * about to beacon and resets the deadline. If the send then fails - an empty packet
+   * pool is enough - the reference has already moved past the travel that triggered it,
+   * so the movement trigger will never fire for that leg again and the update is simply
+   * lost. This puts the scheduler back to having nothing sent yet, so the next poll
+   * beacons the current position immediately.
+   */
+  void undoSend(uint32_t now_ms);
+
   uint32_t getIntervalSecs() const { return _interval_secs; }
   bool hasPosition() const { return _have_last; }
   int32_t getLastSentLat() const { return _last_lat; }

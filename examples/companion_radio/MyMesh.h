@@ -230,6 +230,9 @@ private:
   bool isNewerTrackReport(const uint8_t* prefix, uint32_t timestamp);
 
   mesh::GroupChannel _track_channel;   // deliberately NOT in channels[], so the app never lists it
+  bool isTrackingChannel(const mesh::GroupChannel& ch) const {
+    return memcmp(ch.secret, _track_channel.secret, sizeof(_track_channel.secret)) == 0;
+  }
   AdvertScheduler _track_sampler;
   PositionSample _track_buf[TRACK_BUFFER];
   int _track_count;

@@ -118,6 +118,14 @@ void AdvertScheduler::markSent(uint32_t now_ms, int32_t lat_e6, int32_t lon_e6) 
   _next_ms = now_ms + jitteredMs(_interval_secs);
 }
 
+void AdvertScheduler::undoSend(uint32_t now_ms) {
+  // _last_lat/_last_lon are left where markSent() put them; _have_last is what gates
+  // every read of them, and clearing it is what makes the next poll a first-fix send.
+  _have_last = false;
+  _interval_secs = _cfg.min_interval_secs;
+  _next_ms = now_ms;
+}
+
 void AdvertScheduler::reset(uint32_t now_ms) {
   _interval_secs = _cfg.min_interval_secs;
   _next_ms = now_ms + jitteredMs(_interval_secs);

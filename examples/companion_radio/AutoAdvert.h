@@ -47,6 +47,15 @@
 //
 // The key belongs only to the nodes that may read a position. Repeaters relay these
 // reports without decrypting them, so a repeater never needs it and should not have it.
+// A timestamp beyond now + this is not a late report, it is a bad one. See
+// MyMesh::handleTrackReport: the per-peer replay watermark advances to whatever arrives,
+// so an unbounded future timestamp is a one-packet denial of service against that peer.
+#define TRACK_FUTURE_SLACK_SECS         3600
+
+// Below this, the RTC has clearly never been set (1 Jan 2020), and no timestamp check
+// against it would mean anything.
+#define CLOCK_LOOKS_SET_EPOCH           1577836800
+
 #ifndef TRACK_REPORT
   #define TRACK_REPORT                  0     // 1 = this node reports its own position
 #endif

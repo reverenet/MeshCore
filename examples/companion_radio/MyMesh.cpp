@@ -554,6 +554,15 @@ void MyMesh::onSignedMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uin
 
 void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packet *pkt, uint32_t timestamp,
                                   const char *text) {
+#ifdef TRACKING_KEY
+  if (isTrackingChannel(channel)) {
+    // Text on the tracking channel is not something this node has any way to present -
+    // see onChannelDataRecv. Swallow it rather than push channel 255 at the client.
+    MESH_DEBUG_PRINTLN("onChannelMessageRecv: dropping text on the tracking channel");
+    return;
+  }
+#endif
+
   int i = 0;
   if (app_target_ver >= 3) {
     out_frame[i++] = RESP_CODE_CHANNEL_MSG_RECV_V3;
@@ -602,12 +611,18 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
 void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *pkt, uint16_t data_type,
                                const uint8_t *data, size_t data_len) {
 #ifdef TRACKING_KEY
-  // Intercept before anything reaches the app. A position report must never be
-  // forwarded up as channel data, or the client would surface an unreadable message
-  // on a channel the user never configured.
-  if (data_type == POSITION_REPORT_DATA_TYPE
-      && memcmp(channel.secret, _track_channel.secret, sizeof(_track_channel.secret)) == 0) {
-    handleTrackReport(data, data_len);
+  // Intercept before anything reaches the app. Nothing on the tracking channel may be
+  // forwarded up: the client would surface an unreadable message on a channel the user
+  // never configured, and since findChannelIdx() cannot find it, under the index 255.
+  // That goes for a payload that is NOT a position report too - it still decrypted with
+  // the tracking secret, so it came from inside the group and is ours to swallow.
+  if (isTrackingChannel(channel)) {
+    if (data_type == POSITION_REPORT_DATA_TYPE) {
+      handleTrackReport(data, data_len);
+    } else {
+      MESH_DEBUG_PRINTLN("onChannelDataRecv: dropping type=%d on the tracking channel",
+                         (uint32_t)data_type);
+    }
     return;
   }
 #endif
@@ -2471,6 +2486,21 @@ bool MyMesh::handleTrackReport(const uint8_t* data, size_t data_len) {
 
   const PositionSample& newest = samples[num - 1];
 
+  // A position cannot come from the future, and the watermark below is why that matters.
+  // It advances to whatever timestamp arrives, and the tracking key is symmetric - so one
+  // forged report carrying 0xFFFFFFFF would pin the watermark at the maximum and suppress
+  // that peer's genuine reports until this node reboots. One packet, permanent silence.
+  //
+  // Only enforced once our own clock is set: a node that has not been given the time yet
+  // sees every timestamp as impossibly far ahead, and would reject the lot. An hour of
+  // slack covers the drift between two nodes that have both been set.
+  uint32_t now = getRTCClock()->getCurrentTime();
+  if (now >= CLOCK_LOOKS_SET_EPOCH && newest.timestamp > now + TRACK_FUTURE_SLACK_SECS) {
+    MESH_DEBUG_PRINTLN("handleTrackReport: %s reports %d s into the future - dropped",
+                       from->name, (uint32_t)(newest.timestamp - now));
+    return true;   // handled: must not reach the app, and must not touch the watermark
+  }
+
   // Ignore a report older than the last one from this node, so a replayed or
   // late-arriving batch can't drag a contact backwards.
   //
@@ -2480,7 +2510,12 @@ bool MyMesh::handleTrackReport(const uint8_t* data, size_t data_len) {
   // essentially every report, because a node's adverts are newer than the samples
   // batched up before them; writing to it was worse still, since a report from the
   // future would then make that node's genuine adverts look like replays.
-  if (!isNewerTrackReport(prefix, newest.timestamp)) return true;
+  // ...and the watermark itself never runs ahead of our own clock. Rejecting the wild
+  // case above still leaves an hour of slack for a forgery to eat, and an hour of a
+  // peer's reports is worth more than the two lines this costs.
+  uint32_t stamp = newest.timestamp;
+  if (now >= CLOCK_LOOKS_SET_EPOCH && stamp > now) stamp = now;
+  if (!isNewerTrackReport(prefix, stamp)) return true;
 
   from->gps_lat = newest.lat_e6;
   from->gps_lon = newest.lon_e6;
@@ -2598,7 +2633,9 @@ void MyMesh::checkAutoAdverts() {
                                                   (int32_t)(lat * 1000000.0),
                                                   (int32_t)(lon * 1000000.0));
     if (why != AdvertScheduler::REASON_NONE) {
-      sendAdvert(true, AUTO_ADVERT_LOC_FLOOD);
+      // poll() has already moved the distance reference to here. If the advert does not
+      // actually go out, hand that back, or the travel that triggered it is forgotten.
+      if (!sendAdvert(true, AUTO_ADVERT_LOC_FLOOD)) _loc_sched.undoSend(millis());
     }
   }
 #endif

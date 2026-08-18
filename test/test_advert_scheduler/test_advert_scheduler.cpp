@@ -467,6 +467,52 @@ TEST(AdvertSchedulerJitter, SameSeedReproducesAndZeroSeedIsSafe) {
   EXPECT_TRUE(varies) << "seed 0 produced a degenerate, non-varying sequence";
 }
 
+TEST(AdvertScheduler, AFailedSendDoesNotSwallowTheMovementTrigger) {
+  // poll() commits as it decides - it moves the distance reference to the position it is
+  // about to beacon. If the send then fails and nothing hands that back, the travel that
+  // triggered it is forgotten and the update is lost until the interval elapses.
+  AdvertScheduler s;
+  AdvertScheduler::Config cfg;
+  cfg.min_interval_secs = 600;        // long, so only movement can trigger below
+  cfg.max_interval_secs = 3600;
+  cfg.dist_threshold_m = 100;
+  cfg.jitter_pct = 0;
+  cfg.startup_spread_secs = 0;
+  s.begin(cfg, 0, 0xABCD);
+
+  uint32_t t = 1000;
+  ASSERT_EQ(AdvertScheduler::REASON_FIRST_FIX, s.poll(t, true, 51500000, -120000));
+
+  // travel far enough to trigger, and suppose the send fails
+  t += 60000;
+  ASSERT_EQ(AdvertScheduler::REASON_MOVED, s.poll(t, true, 51502000, -120000));
+  s.undoSend(t);
+
+  // the very next poll must want to send again, at the same place
+  t += 1000;
+  EXPECT_NE(AdvertScheduler::REASON_NONE, s.poll(t, true, 51502000, -120000))
+      << "the movement that triggered the failed send was forgotten";
+}
+
+TEST(AdvertScheduler, UndoIsOnlyNeededOnceTheSendHasFailed) {
+  // the ordinary path is untouched: a successful send still parks until the next trigger
+  AdvertScheduler s;
+  AdvertScheduler::Config cfg;
+  cfg.min_interval_secs = 600;
+  cfg.max_interval_secs = 3600;
+  cfg.dist_threshold_m = 100;
+  cfg.jitter_pct = 0;
+  cfg.startup_spread_secs = 0;
+  s.begin(cfg, 0, 0xABCD);
+
+  uint32_t t = 1000;
+  ASSERT_EQ(AdvertScheduler::REASON_FIRST_FIX, s.poll(t, true, 51500000, -120000));
+  t += 60000;
+  ASSERT_EQ(AdvertScheduler::REASON_MOVED, s.poll(t, true, 51502000, -120000));
+  t += 1000;
+  EXPECT_EQ(AdvertScheduler::REASON_NONE, s.poll(t, true, 51502000, -120000));
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

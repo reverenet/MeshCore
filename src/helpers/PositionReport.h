@@ -97,8 +97,13 @@ public:
   static void whiten(const uint8_t secret[POS_SECRET_LEN], const uint8_t nonce[POS_NONCE_LEN],
                      uint8_t* data, size_t len);
 
-  static int capacityFor(size_t cap) {
-    if (cap < POS_HEADER_LEN) return 0;
-    return 1 + (int)((cap - POS_HEADER_LEN) / POS_DELTA_LEN);
+  // constexpr so a caller can size an array with it. Without that the size is a runtime
+  // value, and 'PositionSample samples[capacityFor(...)]' is a VLA - a GNU extension
+  // rather than C++, and a stack frame that cannot be read off the function.
+  //
+  // One return statement, not an if: the device targets build as C++11, where that is
+  // all a constexpr function may contain. Only the native test envs set -std=c++17.
+  static constexpr int capacityFor(size_t cap) {
+    return (cap < POS_HEADER_LEN) ? 0 : 1 + (int)((cap - POS_HEADER_LEN) / POS_DELTA_LEN);
   }
 };
