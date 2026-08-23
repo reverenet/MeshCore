@@ -180,10 +180,14 @@ ARGUMENTS
 
  position tracking - companion only, needs TRACKING_KEY
   TRACK_REPORT  1 = this node reports its own position. Leave unset on a node that should
-                receive and display tracks without reporting.
+                receive and display tracks without reporting. Settable at runtime as the
+                custom variable 'track', or as TRACK_REPORT under this same name, so what
+                is set here is the value a NEWLY flashed node starts with rather than one
+                it keeps - a saved value survives a reflash and wins.
   TRACK_REPORT_SECS
                 fixed transmit cadence. Constant rate is the point: it stops airtime from
-                revealing whether the node is moving.
+                revealing whether the node is moving. Settable at runtime the same way, as
+                'track_interval' or TRACK_REPORT_SECS, 10..86400.
   TRACK_SAMPLE_MIN_SECS, TRACK_SAMPLE_MAX_SECS, TRACK_SAMPLE_DIST_M
                 how often position is sampled, and how far it must move to force one.
   TRACK_BUFFER  backlog depth, 12 bytes of RAM per sample.
@@ -297,7 +301,7 @@ not_a_decimal = $(shell printf %s '$(1)' | grep -qE '^[0-9]+(\.[0-9]+)?$$' || ec
 # A network profile: radio settings and repeater regions, as NAME = VALUE lines. These
 # are defaults, so anything passed to make overrides the file without editing it.
 # CONFIG= (empty) builds the stock per-variant settings instead.
-CONFIG ?= configs/boston.conf
+CONFIG ?= configs/reverenet.conf
 
 CONFIG_ARGS := $(RADIO_ARGS) $(STRING_ARGS) $(NUMERIC_ARGS) AUTO_ADVERT_LOC_POLICY
 
@@ -675,8 +679,8 @@ MEANS_TRACKING_KEY_FILE := read when it exists - missing is not an error
 MEANS_KEYS_DIR      := where make keys writes and the key file is looked for
 MEANS_GPS_ENABLED   := firmware default - on for a companion off for a repeater
 MEANS_GPS_INTERVAL  := firmware default 0 - the sensor cadence of once a second
-MEANS_TRACK_REPORT  := firmware default 0 - tracks are displayed but not reported
-MEANS_TRACK_REPORT_SECS := firmware default 300s - a constant rate hides movement
+MEANS_TRACK_REPORT  := first-boot default 0 - tracks are displayed but not reported
+MEANS_TRACK_REPORT_SECS := first-boot default 300s - a constant rate hides movement
 MEANS_TRACK_SAMPLE_MIN_SECS := firmware default 60s - fastest sampling while moving
 MEANS_TRACK_SAMPLE_MAX_SECS := firmware default 3600s - slowest once parked
 MEANS_TRACK_SAMPLE_DIST_M := firmware default 100m of travel forces a sample
