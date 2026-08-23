@@ -2,8 +2,10 @@
 
 // Build-time configuration for automatic advert scheduling and position tracking.
 //
-// All of it is compile-time on purpose: the companion app protocol is untouched, so a
-// device can beacon its position without any client update.
+// Almost all of it is compile-time on purpose: the companion app protocol is untouched,
+// so a device can beacon its position without any client update. The two exceptions are
+// TRACK_REPORT and TRACK_REPORT_SECS, which are settable at runtime and so are defaults
+// rather than settings - each is marked below.
 
 // ---------------------------------------------------------------- GPS
 //
@@ -56,6 +58,21 @@
 // against it would mean anything.
 #define CLOCK_LOOKS_SET_EPOCH           1577836800
 
+// Both of the next two are settable at runtime, over the companion protocol's custom
+// variables - as 'track' and 'track_interval', or under these same build-flag names,
+// which are accepted as aliases (see MyMesh::trackingVarName). What is set here is
+// therefore only the DEFAULT for a device with no saved prefs: once either has been
+// stored, that value wins, and changing this file will not move a device already in the
+// field. Reflashing will not move it either - the saved value survives, so a fleet-wide
+// change of mind about reporting has to go out over the command, not the build. The build
+// flag decides what a NEWLY flashed node does on first boot, which is a different job.
+//
+// Note what runtime settability costs: TRACKING_KEY alone no longer guarantees a node
+// cannot report. The transmit path is compiled in whenever the key is, so a receive-only
+// node is now one custom-var write away from beaconing its position. Anyone who can pair
+// with the device can make that write. If a node must be incapable of reporting rather
+// than merely configured not to, leave TRACKING_KEY out of that build entirely and give
+// it a receive-only build of its own.
 #ifndef TRACK_REPORT
   #define TRACK_REPORT                  0     // 1 = this node reports its own position
 #endif
@@ -64,6 +81,15 @@
   // movement, so an observer can't tell a moving node from a parked one by timing alone.
   #define TRACK_REPORT_SECS             300
 #endif
+
+// Bounds on the runtime cadence, enforced wherever it is set or loaded. The floor is not
+// a policy preference: _next_track_report is scheduled as now + interval, so an interval
+// of zero - out of a corrupt prefs file, or an app sending a bad value - would fire on
+// every pass of the loop and transmit continuously. The ceiling is a day, past which a
+// tracking node is not tracking anything.
+#define TRACK_REPORT_MIN_SECS           10
+#define TRACK_REPORT_MAX_SECS           86400
+
 #ifndef TRACK_SAMPLE_MIN_SECS
   #define TRACK_SAMPLE_MIN_SECS         60    // fastest sampling, while moving
 #endif

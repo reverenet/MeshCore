@@ -221,10 +221,20 @@ private:
   unsigned long _next_plain_advert;
   unsigned long _next_loc_poll;
 
+  // Position reporting settings, exposed to the app as the custom vars 'track' and
+  // 'track_interval'. Declared outside the TRACKING_KEY guard because the command
+  // handler has to answer for them either way - a build with no key refuses them,
+  // rather than accepting a setting it cannot act on.
+  static const char* trackingVarName(const char* name);   // canonical name, or NULL
+  bool setTrackingVar(const char* canonical_name, const char* value);
+
 #ifdef TRACKING_KEY
   // position tracking (see AutoAdvert.h)
   void initTracking();
   void checkTracking();
+  void resetTrackReporting();     // (re)arm the sampler and the transmit clock
+  void setTrackReport(bool enable);
+  void setTrackInterval(uint32_t secs);
   void flushTrackReport();
   bool handleTrackReport(const uint8_t* data, size_t data_len);
   bool isNewerTrackReport(const uint8_t* prefix, uint32_t timestamp);

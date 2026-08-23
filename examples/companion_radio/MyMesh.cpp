@@ -923,6 +923,9 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.gps_enabled = GPS_ENABLED;    // see AutoAdvert.h; on unless the build says otherwise
   _prefs.gps_interval = GPS_INTERVAL;  // 0 leaves the sensor manager's own cadence alone
   _prefs.advert_loc_policy = AUTO_ADVERT_LOC_POLICY;   // NONE unless the location beacon is built in
+  // First-boot values only - loadPrefs() below overwrites both if they have ever been set.
+  _prefs.track_report = TRACK_REPORT;
+  _prefs.track_interval = TRACK_REPORT_SECS;
   _prefs.radio_fem_rxgain = 1;
   _prefs.radio_fem_txgain = 0;
 
@@ -989,6 +992,10 @@ void MyMesh::begin(bool has_display) {
   _prefs.tx_power_dbm = constrain(_prefs.tx_power_dbm, -9, MAX_LORA_TX_POWER);
   _prefs.gps_enabled = constrain(_prefs.gps_enabled, 0, 1);  // Ensure boolean 0 or 1
   _prefs.gps_interval = constrain(_prefs.gps_interval, 0, 86400);  // Max 24 hours
+  _prefs.track_report = constrain(_prefs.track_report, 0, 1);
+  // Never zero: see TRACK_REPORT_MIN_SECS in AutoAdvert.h - an interval of zero schedules
+  // the next report for now, every time, and the node transmits without pause.
+  _prefs.track_interval = constrain(_prefs.track_interval, TRACK_REPORT_MIN_SECS, TRACK_REPORT_MAX_SECS);
 
 #ifdef BLE_PIN_CODE // 123456 by default
   if (_prefs.ble_pin == 0) {
@@ -1881,6 +1888,22 @@ void MyMesh::handleCmdFrame(size_t len) {
       strcpy(dp, sensors.getSettingValue(i));
       dp = strchr(dp, 0);
     }
+#ifdef TRACKING_KEY
+    // Listed alongside the sensor settings so an app's generic custom-vars view can show
+    // and edit them without knowing what tracking is. Only on a build that has the key -
+    // elsewhere setTrackingVar refuses them, and offering a setting that cannot be set
+    // would be worse than not offering it.
+    {
+      char pair[48];
+      int n = snprintf(pair, sizeof(pair), "%strack:%d,track_interval:%u",
+                       dp == (char *)&out_frame[1] ? "" : ",",
+                       (int)_prefs.track_report, (unsigned)_prefs.track_interval);
+      if (n > 0 && (dp - (char *)out_frame) + n < MAX_FRAME_SIZE) {
+        memcpy(dp, pair, n);
+        dp += n;
+      }
+    }
+#endif
     _serial->writeFrame(out_frame, dp - (char *)out_frame);
   } else if (cmd_frame[0] == CMD_SET_CUSTOM_VAR && len >= 4) {
     cmd_frame[len] = 0;
@@ -1888,19 +1911,25 @@ void MyMesh::handleCmdFrame(size_t len) {
     char *np = strchr(sp, ':'); // look for separator char
     if (np) {
       *np++ = 0; // modify 'cmd_frame', replace ':' with null
-      bool success = sensors.setSettingValue(sp, np);
-      if (success) {
+      bool success;
+      const char* track_var = trackingVarName(sp);
+      if (track_var) {   // ours, not the sensor manager's - see setTrackingVar
+        success = setTrackingVar(track_var, np);
+      } else {
+        success = sensors.setSettingValue(sp, np);
         #if ENV_INCLUDE_GPS == 1
         // Update node preferences for GPS settings
-        if (strcmp(sp, "gps") == 0) {
+        if (success && strcmp(sp, "gps") == 0) {
           _prefs.gps_enabled = (np[0] == '1') ? 1 : 0;
           savePrefs();
-        } else if (strcmp(sp, "gps_interval") == 0) {
+        } else if (success && strcmp(sp, "gps_interval") == 0) {
           uint32_t interval_seconds = atoi(np);
           _prefs.gps_interval = constrain(interval_seconds, 0, 86400);
           savePrefs();
         }
         #endif
+      }
+      if (success) {
         writeOKFrame();
       } else {
         writeErrFrame(ERR_CODE_ILLEGAL_ARG);
@@ -2390,6 +2419,15 @@ void MyMesh::initTracking() {
   mesh::Utils::sha256(_track_channel.hash, sizeof(_track_channel.hash),
                       _track_channel.secret, 32);
 
+  _track_seen_count = 0;
+  resetTrackReporting();
+}
+
+// Everything that has to start from a clean slate when reporting begins - at boot, and
+// again whenever it is switched back on at runtime. Kept apart from initTracking() so
+// that re-enabling does not re-derive the channel or wipe the replay watermarks: those
+// belong to the receive side, which runs whether or not this node reports.
+void MyMesh::resetTrackReporting() {
   AdvertScheduler::Config cfg;
   cfg.min_interval_secs = TRACK_SAMPLE_MIN_SECS;
   cfg.max_interval_secs = TRACK_SAMPLE_MAX_SECS;
@@ -2403,10 +2441,34 @@ void MyMesh::initTracking() {
   _track_sampler.begin(cfg, millis(), seed ^ 0x54524B31);
 
   _track_count = 0;
-  _track_seen_count = 0;
   _next_track_poll = futureMillis(1000);
   // stagger the first report so a fleet doesn't transmit in lockstep
-  _next_track_report = futureMillis((uint32_t)(seed % TRACK_REPORT_SECS) * 1000);
+  _next_track_report = futureMillis((uint32_t)(seed % _prefs.track_interval) * 1000);
+}
+
+void MyMesh::setTrackReport(bool enable) {
+  if (enable == (_prefs.track_report != 0)) return;   // no change
+  _prefs.track_report = enable ? 1 : 0;
+
+  if (enable) {
+    resetTrackReporting();
+  } else {
+    // Drop the backlog rather than hold it. These are positions from before the user
+    // asked us to stop, and keeping them would mean transmitting them on whatever day
+    // reporting is switched back on - turning "stop reporting" into "report all of it
+    // later". Off has to mean the samples are gone.
+    _track_count = 0;
+  }
+}
+
+void MyMesh::setTrackInterval(uint32_t secs) {
+  secs = constrain(secs, TRACK_REPORT_MIN_SECS, TRACK_REPORT_MAX_SECS);
+  if (secs == _prefs.track_interval) return;
+  _prefs.track_interval = secs;
+
+  // Start the new cadence now instead of letting the pending deadline run out. Going from
+  // an hour down to a minute should not mean waiting up to an hour for the first effect.
+  _next_track_report = futureMillis(secs * 1000);
 }
 
 // Matched IN ADDITION to the user's channels, so tracking traffic decrypts without
@@ -2521,14 +2583,28 @@ bool MyMesh::handleTrackReport(const uint8_t* data, size_t data_len) {
   from->gps_lon = newest.lon_e6;
   from->lastmod = getRTCClock()->getCurrentTime();
 
-  // The app picks this up through the contact sync it already does - it sees the
-  // contact's position change exactly as it would after an advert.
+  // Tell the app the contact changed. Bumping lastmod is not enough on its own: the
+  // client only re-reads contacts when something prompts it to, and with no prompt the
+  // new position sits in RAM until the next reconnect. This is the same push an advert
+  // produces (BaseChatMesh::onAdvertRecv -> onDiscoveredContact), and it carries only
+  // the public key - the app answers it with CMD_GET_CONTACTS 'since', which is where
+  // the lastmod above earns its keep.
+  if (_serial->isConnected()) {
+    out_frame[0] = PUSH_CODE_ADVERT;
+    memcpy(&out_frame[1], from->id.pub_key, PUB_KEY_SIZE);
+    _serial->writeFrame(out_frame, 1 + PUB_KEY_SIZE);
+  }
+
   dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY);
   return true;
 }
 
 void MyMesh::checkTracking() {
-#if TRACK_REPORT
+  // Runtime, not compile-time: TRACK_REPORT only seeds this at first boot, and the app
+  // can turn it off and on afterwards. Sampling is gated with transmit deliberately - a
+  // node told not to report should not be quietly filling a buffer with positions either.
+  if (!_prefs.track_report) return;
+
   if (millisHasNowPassed(_next_track_poll)) {
     _next_track_poll = futureMillis(1000);
 
@@ -2551,10 +2627,9 @@ void MyMesh::checkTracking() {
   // Fixed cadence, regardless of whether we moved. That is the whole point: airtime
   // must not correlate with motion, or the timing alone reveals who is moving.
   if (millisHasNowPassed(_next_track_report)) {
-    _next_track_report = futureMillis((uint32_t)TRACK_REPORT_SECS * 1000);
+    _next_track_report = futureMillis(_prefs.track_interval * 1000);
     flushTrackReport();
   }
-#endif
 }
 
 void MyMesh::flushTrackReport() {
@@ -2621,6 +2696,52 @@ void MyMesh::flushTrackReport() {
   }
 }
 #endif   // TRACKING_KEY
+
+// The two position-reporting settings are carried as custom variables, the same generic
+// name:value channel the GPS toggle already uses (CMD_SET_CUSTOM_VAR / CMD_GET_CUSTOM_VARS).
+// That keeps the promise made at the top of AutoAdvert.h: no new command opcode, so no
+// client change is needed to reach them - any app build with a custom-vars view can.
+//
+// They are handled here rather than in SensorManager, where 'gps' lives, because position
+// reporting is a property of the mesh and not of a sensor: routing it through the sensor
+// manager would mean adding the same two settings to every board variant that has one.
+// The build-flag spellings are accepted as aliases, so that one name works everywhere:
+// TRACK_REPORT is what the Makefile, configs/boston.conf and the docs all call this, and
+// having to remember a second spelling at the command is a good way to set nothing at all
+// and think you set something. Only the canonical names are ever reported back, so the
+// app still sees one setting rather than two that shadow each other.
+const char* MyMesh::trackingVarName(const char* name) {
+  if (strcmp(name, "track") == 0 || strcmp(name, "TRACK_REPORT") == 0) {
+    return "track";
+  }
+  if (strcmp(name, "track_interval") == 0 || strcmp(name, "TRACK_REPORT_SECS") == 0) {
+    return "track_interval";
+  }
+  return NULL;   // not one of ours - leave it to the sensor manager
+}
+
+bool MyMesh::setTrackingVar(const char* canonical_name, const char* value) {
+#ifdef TRACKING_KEY
+  if (strcmp(canonical_name, "track") == 0) {
+    // Strict, because the alternative is a typo reading as 0 and silently switching
+    // reporting off - which looks exactly like the bug this feature keeps producing.
+    if (value[1] != 0 || (value[0] != '0' && value[0] != '1')) return false;
+    setTrackReport(value[0] == '1');
+  } else {
+    // Refused rather than clamped: a caller asking for 2 seconds has misunderstood
+    // something, and quietly giving it 10 would hide that until someone reads the airtime.
+    uint32_t secs = (uint32_t) atoi(value);
+    if (secs < TRACK_REPORT_MIN_SECS || secs > TRACK_REPORT_MAX_SECS) return false;
+    setTrackInterval(secs);
+  }
+  savePrefs();
+  return true;
+#else
+  // No tracking key in this build, so there is nothing to configure. Refusing is the
+  // honest answer - accepting would store a setting that can never take effect.
+  return false;
+#endif
+}
 
 void MyMesh::checkAutoAdverts() {
 #if AUTO_ADVERT_SECS > 0

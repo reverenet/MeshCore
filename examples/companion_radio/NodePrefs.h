@@ -38,6 +38,8 @@ public:
   uint8_t _client_repeat = 0;  // DEPRECATED -> use repeat.disable_fwd
   uint8_t path_hash_mode = 0;    // which path mode to use when sending
   uint8_t autoadd_max_hops = 0;  // 0 = no limit, 1 = direct (0 hops), N = up to N-1 hops (max 64)
+  uint8_t  track_report = 0;     // 1 = report our own position (see AutoAdvert.h)
+  uint32_t track_interval = 0;   // seconds between position reports
   char default_scope_name[31];
   uint8_t default_scope_key[16];
 
@@ -115,6 +117,11 @@ private:
       def("tel_base", _parent->telemetry_mode_base);
       def("tel_loc", _parent->telemetry_mode_loc);
       def("tel_env", _parent->telemetry_mode_env);
+      // Position reporting. Absent from an older prefs file, in which case each keeps the
+      // value the constructor took from the build flags - ConfigSerializer only assigns
+      // on a key match, so a missing key reads as "not configured" rather than as zero.
+      def("trk_rep", _parent->track_report);
+      def("trk_int", _parent->track_interval);
     }
   public:
     CompanionPrefs(NodePrefs* parent) : _parent(parent) { }
