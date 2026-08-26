@@ -13,9 +13,16 @@
  * is answered from a ring of the samples the node has already taken, so the answer costs
  * no GPS work and no extra sampling.
  *
- * WHY A SEPARATE RING. The tracking buffer holds samples that have not been transmitted
- * yet and is drained on every report, so by the time anyone asks, it is usually empty.
- * The ring here keeps a copy of every sample taken, and the oldest falls off the end.
+ * ONE RING, TWO READERS. Sending consumes nothing: a sample stays until a newer one
+ * pushes it off the end, whether or not it has ever been on the air. Automated reports
+ * pack the newest samples that fit (PositionReport::encodeNewest) and answers to a
+ * history request stream from wherever the asker said, and neither disturbs the other.
+ *
+ * That is what makes the gap recoverable. A report shows a receiver where a node is now;
+ * if the receiver can see it has nothing between the previous report and this one, it
+ * asks for that stretch and the sender reads it back out of the same ring. A queue that
+ * emptied as it transmitted could not answer, and one that sent its oldest entries first
+ * would spend a report telling everyone where a node used to be.
  *
  * TWO LAYERS OF KEY, and they answer different questions. The request and the response
  * travel inside an ordinary contact datagram, so the pairwise secret already means only
@@ -143,6 +150,15 @@ public:
 
   /** \brief  One sample by sequence number. Returns false once it has fallen off the ring. */
   bool getSeq(uint32_t seq, PositionSample& dest) const;
+
+  /**
+   * \brief  Copy the newest samples, oldest-first, for an automated report to pack from.
+   * \returns  how many were copied: min(count(), max).
+   *
+   * Oldest-first even though it is the newest samples being taken, because that is the
+   * order the report format encodes in - each position is a delta on the one before it.
+   */
+  int newest(PositionSample* dest, int max) const;
 
   /** \brief  Begin answering 'req'. Cheap: it selects nothing until next() is called. */
   void start(Cursor& c, const PositionHistoryReq& req) const;

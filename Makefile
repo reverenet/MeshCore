@@ -210,7 +210,6 @@ ARGUMENTS
                 'track_interval' or TRACK_REPORT_SECS, 10..86400.
   TRACK_SAMPLE_MIN_SECS, TRACK_SAMPLE_MAX_SECS, TRACK_SAMPLE_DIST_M
                 how often position is sampled, and how far it must move to force one.
-  TRACK_BUFFER  backlog depth, 12 bytes of RAM per sample.
   TRACK_FLOOD   0 = zero-hop (default), 1 = scoped flood.
 
  advert scheduling - companion only
@@ -278,7 +277,7 @@ NUMERIC_ARGS := \
   FLOOD_MAX_ADVERT \
   GPS_ENABLED GPS_INTERVAL \
   TRACK_REPORT TRACK_REPORT_SECS TRACK_SAMPLE_MIN_SECS TRACK_SAMPLE_MAX_SECS \
-  TRACK_SAMPLE_DIST_M TRACK_BUFFER TRACK_FLOOD \
+  TRACK_SAMPLE_DIST_M TRACK_FLOOD \
   AUTO_ADVERT_SECS AUTO_ADVERT_FLOOD \
   AUTO_ADVERT_LOC AUTO_ADVERT_LOC_MIN_SECS AUTO_ADVERT_LOC_MAX_SECS \
   AUTO_ADVERT_LOC_DIST_M AUTO_ADVERT_LOC_BACKOFF AUTO_ADVERT_LOC_JITTER_PCT \
@@ -581,6 +580,16 @@ ifneq ($(AUTO_ADVERT_LOC_POLICY),)
   endif
 endif
 
+# TRACK_BUFFER held samples waiting to be transmitted, and was emptied by sending them.
+# Nothing is emptied by sending any more - reports are packed from the newest end of the
+# samples a node holds, and TRACK_HISTORY is how many that is. Left unsaid, an old
+# TRACK_BUFFER= on a command line would be accepted and do nothing at all.
+ifdef TRACK_BUFFER
+  $(error TRACK_BUFFER is now TRACK_HISTORY, and means something different: the samples \
+          a node holds rather than a backlog waiting to go out. Nothing is consumed by \
+          transmitting, so it no longer has to be drained - see AutoAdvert.h)
+endif
+
 # combinations that build cleanly but don't do what they look like they do
 ifeq ($(TRACKING_KEY),)
   ifeq ($(TRACK_REPORT),1)
@@ -712,7 +721,7 @@ BUILD_SETTINGS := NAME BLE_PIN BLE_PIN_FILE CONFIG $(RADIO_ARGS) $(STRING_ARGS) 
   TRACKING_KEY TRACKING_KEY_FILE KEYS_DIR CHANNELS CHANNELS_KEY_FILE \
   GPS_ENABLED GPS_INTERVAL \
   TRACK_REPORT TRACK_REPORT_SECS TRACK_SAMPLE_MIN_SECS TRACK_SAMPLE_MAX_SECS \
-  TRACK_SAMPLE_DIST_M TRACK_BUFFER TRACK_FLOOD \
+  TRACK_SAMPLE_DIST_M TRACK_FLOOD \
   AUTO_ADVERT_SECS AUTO_ADVERT_FLOOD AUTO_ADVERT_LOC AUTO_ADVERT_LOC_POLICY \
   AUTO_ADVERT_LOC_MIN_SECS AUTO_ADVERT_LOC_MAX_SECS AUTO_ADVERT_LOC_DIST_M \
   AUTO_ADVERT_LOC_BACKOFF AUTO_ADVERT_LOC_JITTER_PCT AUTO_ADVERT_LOC_STARTUP_SECS \
@@ -774,7 +783,6 @@ MEANS_TRACK_REPORT_SECS := first-boot default 300s - a constant rate hides movem
 MEANS_TRACK_SAMPLE_MIN_SECS := firmware default 60s - fastest sampling while moving
 MEANS_TRACK_SAMPLE_MAX_SECS := firmware default 3600s - slowest once parked
 MEANS_TRACK_SAMPLE_DIST_M := firmware default 100m of travel forces a sample
-MEANS_TRACK_BUFFER  := firmware default 48 samples - 12 bytes of RAM each
 MEANS_TRACK_FLOOD   := firmware default 0 - zero-hop
 MEANS_AUTO_ADVERT_SECS := firmware default 0 - no periodic advert
 MEANS_AUTO_ADVERT_FLOOD := firmware default 0 - zero-hop

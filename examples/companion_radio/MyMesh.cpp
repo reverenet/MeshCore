@@ -675,7 +675,7 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
 
 uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_timestamp, const uint8_t *data,
                                  uint8_t len, uint8_t *reply) {
-#if defined(TRACKING_KEY) && TRACK_HISTORY > 0
+#if defined(TRACKING_KEY) && TRACK_ANSWER_HISTORY
   if (data[0] == REQ_TYPE_GET_POSITION_HISTORY) {
     // No inline reply. One reply is what this hook can return, and the answer is a series
     // - so all of it goes out from checkHistoryResponse(), where the packets can be paced
@@ -2457,7 +2457,7 @@ void MyMesh::loop() {
   checkAutoAdverts();
 #ifdef TRACKING_KEY
   checkTracking();
-#if TRACK_HISTORY > 0
+#if TRACK_ANSWER_HISTORY
   checkHistoryResponse();
 #endif
 #endif
@@ -2540,9 +2540,9 @@ void MyMesh::initTracking() {
                       _track_channel.secret, 32);
 
   _track_seen_count = 0;
-
-#if TRACK_HISTORY > 0
   _hist.begin(_hist_buf, TRACK_HISTORY);
+
+#if TRACK_ANSWER_HISTORY
   _hist_active = false;
   _hist_next_ok = futureMillis(0);   // the first request is answerable straight away
 #endif
@@ -2567,7 +2567,8 @@ void MyMesh::resetTrackReporting() {
   memcpy(&seed, self_id.pub_key, sizeof(seed));
   _track_sampler.begin(cfg, millis(), seed ^ 0x54524B31);
 
-  _track_count = 0;
+  // The samples themselves stay: they are as true as they were, and something may still
+  // ask for them.
   _next_track_poll = futureMillis(1000);
   // stagger the first report so a fleet doesn't transmit in lockstep
   _next_track_report = futureMillis((uint32_t)(seed % _prefs.track_interval) * 1000);
@@ -2580,11 +2581,19 @@ void MyMesh::setTrackReport(bool enable) {
   if (enable) {
     resetTrackReporting();
   } else {
-    // Drop the backlog rather than hold it. These are positions from before the user
+    // Drop everything held rather than keep it. These are positions from before the user
     // asked us to stop, and keeping them would mean transmitting them on whatever day
     // reporting is switched back on - turning "stop reporting" into "report all of it
     // later". Off has to mean the samples are gone.
-    _track_count = 0;
+    //
+    // That now matters twice over: the same samples are what a history request is
+    // answered from, so holding them would leave a node that was told to stop reporting
+    // still able to tell a contact where it had been. An answer already being sent goes
+    // with them, for the same reason.
+    _hist.clear();
+#if TRACK_ANSWER_HISTORY
+    _hist_active = false;
+#endif
   }
 }
 
@@ -2775,20 +2784,11 @@ void MyMesh::checkTracking() {
     if (_track_sampler.poll(millis(), valid,
                             (int32_t)(lat * 1000000.0), (int32_t)(lon * 1000000.0))
           != AdvertScheduler::REASON_NONE) {
-      if (_track_count >= TRACK_BUFFER) {   // backlog full: drop the oldest sample
-        memmove(&_track_buf[0], &_track_buf[1], sizeof(PositionSample) * (TRACK_BUFFER - 1));
-        _track_count = TRACK_BUFFER - 1;
-      }
-      PositionSample& s = _track_buf[_track_count++];
+      PositionSample s;
       s.timestamp = getRTCClock()->getCurrentTime();
       s.lat_e6 = (int32_t)(lat * 1000000.0);
       s.lon_e6 = (int32_t)(lon * 1000000.0);
-#if TRACK_HISTORY > 0
-      // The same sample again, kept for anyone who asks where we have been. The buffer
-      // above is drained on every report, so by the time a question arrives it is usually
-      // empty - the ring is what makes the answer possible at all.
-      _hist.add(s);
-#endif
+      _hist.add(s);   // the oldest falls off the end, transmitted or not
     }
   }
 
@@ -2801,16 +2801,22 @@ void MyMesh::checkTracking() {
 }
 
 void MyMesh::flushTrackReport() {
-  if (_track_count == 0) {
-    // Nothing new to say. Still send our current position if we have one, so the
-    // transmission rate stays flat and says nothing about whether we are moving.
-    double lat, lon;
-    if (!getTrackingLocation(lat, lon)) return;
-    _track_buf[0].timestamp = getRTCClock()->getCurrentTime();
-    _track_buf[0].lat_e6 = (int32_t)(lat * 1000000.0);
-    _track_buf[0].lon_e6 = (int32_t)(lon * 1000000.0);
-    _track_count = 1;
+  // Where we are NOW, taken at report time and kept like any other sample. The sampler
+  // has its own schedule and backs off to an hour while the node sits still, so without
+  // this a parked node would broadcast the same window of samples over and over - and an
+  // identical report is an identical packet, because the whitening nonce is derived from
+  // the plaintext. The mesh dedup tables would drop every repeat, and the node would fall
+  // silent for as long as it stayed put. Silence that starts when a node stops moving is
+  // exactly what the fixed cadence exists to prevent.
+  double lat, lon;
+  if (getTrackingLocation(lat, lon)) {
+    PositionSample now;
+    now.timestamp = getRTCClock()->getCurrentTime();
+    now.lat_e6 = (int32_t)(lat * 1000000.0);
+    now.lon_e6 = (int32_t)(lon * 1000000.0);
+    _hist.add(now);
   }
+  if (_hist.isEmpty()) return;   // no fix has ever been had: nothing to report
 
   uint8_t blob[MAX_GROUP_DATA_LENGTH];
   int i = 0;
@@ -2819,16 +2825,19 @@ void MyMesh::flushTrackReport() {
   int len_pos = i++;
   uint8_t* nonce = &blob[i]; i += POS_NONCE_LEN;   // in the clear: the receiver needs it
 
-  int consumed = 0;
-  int n = PositionReport::encode(&blob[i], sizeof(blob) - i, self_id.pub_key,
-                                 _track_buf, _track_count, &consumed);
+  // The newest samples that fit, counting back from the most recent - never the oldest
+  // ones waiting. Where a node is now is the whole point of a report; a receiver that
+  // needs the stretch in between asks for it, and it is still here to be asked for.
+  PositionSample window[PositionReport::capacityFor(MAX_GROUP_DATA_LENGTH - 3 - POS_NONCE_LEN)];
+  int have = _hist.newest(window, (int)(sizeof(window) / sizeof(window[0])));
+
+  int first = 0, count = 0;
+  int n = PositionReport::encodeNewest(&blob[i], sizeof(blob) - i, self_id.pub_key,
+                                       window, have, &first, &count);
   if (n <= 0) {
-    // Keep the backlog. Encoding only fails when the budget is too small to hold even a
-    // header, which is a build-time property rather than something this batch did - so
-    // throwing the samples away would lose real positions to a condition that will be
-    // just as true next time. The buffer is bounded, and the oldest sample falls off it.
-    MESH_DEBUG_PRINTLN("flushTrackReport: no room to encode a report, keeping %d samples",
-                       (uint32_t)_track_count);
+    // Only reachable when the budget cannot hold even a header, which is a build-time
+    // property rather than anything this batch did.
+    MESH_DEBUG_PRINTLN("flushTrackReport: no room to encode a report");
     return;
   }
 
@@ -2843,7 +2852,7 @@ void MyMesh::flushTrackReport() {
   PositionReport::whiten(_track_channel.secret, nonce, &blob[i], n);
 
   mesh::Packet* pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_DATA, _track_channel, blob, i + n);
-  if (pkt == NULL) return;   // pool empty: keep the backlog and try again next cadence
+  if (pkt == NULL) return;   // pool empty: nothing was consumed, so the next cadence retries
 
 #if TRACK_FLOOD
   {
@@ -2855,16 +2864,17 @@ void MyMesh::flushTrackReport() {
   sendZeroHop(pkt);
 #endif
 
-  // retain anything that didn't fit, so a long backlog drains over several reports
-  if (consumed >= _track_count) {
-    _track_count = 0;
-  } else {
-    memmove(&_track_buf[0], &_track_buf[consumed], sizeof(PositionSample) * (_track_count - consumed));
-    _track_count -= consumed;
-  }
+  // Nothing is consumed by sending: the samples that just went out are still held, and
+  // the next report will carry as many of them again as there is room for after the new
+  // ones. That overlap is what keeps every report the same length, whether this node is
+  // moving or parked - a report trimmed to only what is new would put a movement meter
+  // on the outside of the packet, where anyone can read it without the key.
+  MESH_DEBUG_PRINTLN("flushTrackReport: sent %d of %d held, back to %d s ago",
+                     (uint32_t)count, (uint32_t)_hist.count(),
+                     (uint32_t)(getRTCClock()->getCurrentTime() - window[first].timestamp));
 }
 
-#if TRACK_HISTORY > 0
+#if TRACK_ANSWER_HISTORY
 
 // What one response packet may carry. The ceiling is createDatagram's: a contact datagram
 // holds MAX_PACKET_PAYLOAD once the MAC and the cipher's block padding are paid for.
@@ -3028,7 +3038,7 @@ void MyMesh::checkHistoryResponse() {
   }
 }
 
-#endif   // TRACK_HISTORY > 0
+#endif   // TRACK_ANSWER_HISTORY
 #endif   // TRACKING_KEY
 
 // The two position-reporting settings are carried as custom variables, the same generic
@@ -3107,7 +3117,7 @@ void MyMesh::checkAutoAdverts() {
 // To check if there is pending work
 bool MyMesh::hasPendingWork() const {
   return _mgr->getOutboundTotal() > 0 || dirty_contacts_expiry != 0
-#if defined(TRACKING_KEY) && TRACK_HISTORY > 0
+#if defined(TRACKING_KEY) && TRACK_ANSWER_HISTORY
       || _hist_active   // an answer with packets still to send is work, not idleness
 #endif
       ;

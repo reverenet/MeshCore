@@ -99,11 +99,6 @@
 #ifndef TRACK_SAMPLE_DIST_M
   #define TRACK_SAMPLE_DIST_M           100
 #endif
-#ifndef TRACK_BUFFER
-  // Backlog depth. Bigger buffers ride out longer gaps in coverage; each sample is 12
-  // bytes of RAM here and 6 bytes on air.
-  #define TRACK_BUFFER                  48
-#endif
 #ifndef TRACK_FLOOD
   #define TRACK_FLOOD                   0     // 0 = zero-hop, 1 = scoped flood
 #endif
@@ -149,14 +144,32 @@
 // TRACK_REPORT off is not sampling, so it has nothing to answer with - which is the
 // intended answer for a node told not to say where it is.
 #ifndef TRACK_HISTORY
-  // Samples kept to answer with, 12 bytes of RAM each. 0 compiles the whole feature out,
-  // and a node that cannot answer simply does not - it is a request type it has never
-  // heard of, which is what every other node on the mesh already thinks of it.
+  // How many recent samples the node keeps, 12 bytes of RAM each. This is the whole
+  // store: reports are packed from the newest end of it, history requests are answered
+  // out of the middle of it, and neither consumes anything. A new sample pushes the
+  // oldest off, whether or not that one was ever transmitted.
   //
   // At the 60s sampling floor this is about four hours of continuous movement, and far
-  // longer than that for a node that spends most of its time parked, because the sampler
-  // backs off to an hour when it is not moving.
+  // longer for a node that spends its time parked, because the sampler backs off to an
+  // hour when it is not moving.
+  //
+  // Sizing it is no longer about how much can be sent - a report carries the newest 23
+  // positions however deep this is - but about how far back somebody can ASK. Deeper
+  // costs RAM and nothing else: no extra airtime, and no old positions crowding out new
+  // ones, because the newest always go out first.
   #define TRACK_HISTORY                 256
+#endif
+#if TRACK_HISTORY < 1
+  #error "TRACK_HISTORY is where a node's positions live - it cannot be 0. To build a \
+node that reports but will not answer questions about where it has been, set \
+TRACK_ANSWER_HISTORY=0 instead."
+#endif
+#ifndef TRACK_ANSWER_HISTORY
+  // Whether this node answers a history request at all. 0 compiles the answering side
+  // out, for a node that should report its position on the fixed cadence and say nothing
+  // more - a request it does not answer looks exactly like a request to a node that has
+  // never heard of them, which is what every other node on the mesh is.
+  #define TRACK_ANSWER_HISTORY          1
 #endif
 #ifndef TRACK_HISTORY_MAX_PKTS
   // Most packets one answer may take. A cap belongs here rather than in the request

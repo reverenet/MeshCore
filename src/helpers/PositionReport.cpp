@@ -128,3 +128,36 @@ void PositionReport::deriveNonce(const uint8_t secret[POS_SECRET_LEN], const uin
   mesh::Utils::sha256(full, sizeof(full), secret, POS_SECRET_LEN, plain, (int)len);
   memcpy(nonce, full, POS_NONCE_LEN);
 }
+
+int PositionReport::encodeNewest(uint8_t* dest, size_t dest_cap,
+                                 const uint8_t pubkey_prefix[POS_PREFIX_LEN],
+                                 const PositionSample* samples, int num_samples,
+                                 int* first, int* count) {
+  if (first) *first = 0;
+  if (count) *count = 0;
+  if (num_samples <= 0) return 0;
+
+  int cap = capacityFor(dest_cap);
+  if (cap <= 0) return 0;
+
+  // start on the last 'cap' samples, which is the answer whenever every step between
+  // them fits - the common case, and the only one that costs a single encode
+  int start = (num_samples > cap) ? (num_samples - cap) : 0;
+
+  for (;;) {
+    int consumed = 0;
+    int len = encode(dest, dest_cap, pubkey_prefix, &samples[start], num_samples - start, &consumed);
+    if (len <= 0 || consumed <= 0) return 0;
+
+    if (start + consumed >= num_samples) {   // reached the newest sample: this is the run
+      if (first) *first = start;
+      if (count) *count = consumed;
+      return len;
+    }
+
+    // encode() stopped early on a step it could not express, and everything newer than
+    // that is what we came for. Move past the break and encode again. This terminates
+    // because consumed is at least 1, so start always advances.
+    start += consumed;
+  }
+}

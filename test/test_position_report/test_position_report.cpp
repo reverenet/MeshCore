@@ -275,6 +275,113 @@ TEST(PositionReport, ADifferentKeyGivesADifferentKeystream) {
   EXPECT_NE(0, memcmp(a, b, sizeof(a)));
 }
 
+// ------------------------------------------------- packing the newest, not the oldest
+
+// decode a report back into samples, for asserting on what actually went in
+static std::vector<PositionSample> decoded(const uint8_t* buf, int len) {
+  uint8_t prefix[POS_PREFIX_LEN];
+  PositionSample out[64];
+  int n = PositionReport::decode(buf, len, prefix, out, 64);
+  return std::vector<PositionSample>(out, out + (n > 0 ? n : 0));
+}
+
+TEST(PositionReportNewest, TakesTheEndOfALongRun) {
+  std::vector<PositionSample> in;
+  for (int i = 0; i < 100; i++) in.push_back(mk(1750000000 + i * 60, 51500000 + i * 100, -120000));
+
+  uint8_t buf[BUDGET];
+  int first = -1, count = -1;
+  int len = PositionReport::encodeNewest(buf, sizeof(buf), PREFIX, in.data(), (int)in.size(),
+                                         &first, &count);
+  ASSERT_GT(len, 0);
+
+  const int cap = PositionReport::capacityFor(BUDGET);
+  EXPECT_EQ(cap, count) << "should fill the packet";
+  EXPECT_EQ(100 - cap, first);
+
+  auto got = decoded(buf, len);
+  ASSERT_EQ((size_t)cap, got.size());
+  EXPECT_EQ(in.back().timestamp, got.back().timestamp) << "the newest sample must be in it";
+  EXPECT_EQ(in[100 - cap].timestamp, got.front().timestamp);
+}
+
+TEST(PositionReportNewest, TakesEverythingWhenItAllFits) {
+  std::vector<PositionSample> in;
+  for (int i = 0; i < 5; i++) in.push_back(mk(1750000000 + i * 60, 51500000, -120000));
+
+  uint8_t buf[BUDGET];
+  int first = -1, count = -1;
+  int len = PositionReport::encodeNewest(buf, sizeof(buf), PREFIX, in.data(), (int)in.size(),
+                                         &first, &count);
+  ASSERT_GT(len, 0);
+  EXPECT_EQ(0, first);
+  EXPECT_EQ(5, count);
+  EXPECT_EQ(5u, decoded(buf, len).size());
+}
+
+TEST(PositionReportNewest, StartsPastAStepItCannotExpress) {
+  // a jump far beyond what an i16 of micro-degrees can carry, three samples from the end
+  std::vector<PositionSample> in;
+  for (int i = 0; i < 10; i++) in.push_back(mk(1750000000 + i * 60, 51500000, -120000));
+  for (int i = 0; i < 3; i++) in.push_back(mk(1750000600 + (i + 1) * 60, 52500000, -120000));
+
+  uint8_t buf[BUDGET];
+  int first = -1, count = -1;
+  int len = PositionReport::encodeNewest(buf, sizeof(buf), PREFIX, in.data(), (int)in.size(),
+                                         &first, &count);
+  ASSERT_GT(len, 0);
+  EXPECT_EQ(10, first) << "the report begins after the break, not before it";
+  EXPECT_EQ(3, count);
+
+  auto got = decoded(buf, len);
+  ASSERT_EQ(3u, got.size());
+  EXPECT_EQ(in.back().timestamp, got.back().timestamp);
+  EXPECT_EQ(52500000, got.front().lat_e6);
+}
+
+TEST(PositionReportNewest, StartsPastAGapTooLongForTheTimeDelta) {
+  std::vector<PositionSample> in;
+  for (int i = 0; i < 6; i++) in.push_back(mk(1750000000 + i * 60, 51500000, -120000));
+  // the node was off for a day: more than the u16 of seconds a delta carries
+  in.push_back(mk(1750000300 + 90000, 51500000, -120000));
+  in.push_back(mk(1750000300 + 90060, 51500000, -120000));
+
+  uint8_t buf[BUDGET];
+  int first = -1, count = -1;
+  int len = PositionReport::encodeNewest(buf, sizeof(buf), PREFIX, in.data(), (int)in.size(),
+                                         &first, &count);
+  ASSERT_GT(len, 0);
+  EXPECT_EQ(6, first);
+  EXPECT_EQ(2, count);
+  EXPECT_EQ(in.back().timestamp, decoded(buf, len).back().timestamp);
+}
+
+TEST(PositionReportNewest, SurvivesABreakInEveryStep) {
+  // every step too big to express, so each attempt advances by exactly one sample
+  std::vector<PositionSample> in;
+  for (int i = 0; i < 20; i++) in.push_back(mk(1750000000 + i * 60, 51500000 + i * 1000000, -120000));
+
+  uint8_t buf[BUDGET];
+  int first = -1, count = -1;
+  int len = PositionReport::encodeNewest(buf, sizeof(buf), PREFIX, in.data(), (int)in.size(),
+                                         &first, &count);
+  ASSERT_GT(len, 0);
+  EXPECT_EQ(19, first) << "only the last sample can be carried";
+  EXPECT_EQ(1, count);
+  EXPECT_EQ(in.back().timestamp, decoded(buf, len).front().timestamp);
+}
+
+TEST(PositionReportNewest, RefusesWhatItCannotEncode) {
+  std::vector<PositionSample> in = { mk(1750000000, 51500000, -120000) };
+  uint8_t buf[BUDGET];
+  int first = -1, count = -1;
+
+  EXPECT_EQ(0, PositionReport::encodeNewest(buf, sizeof(buf), PREFIX, in.data(), 0, &first, &count));
+  EXPECT_EQ(0, count);
+  EXPECT_EQ(0, PositionReport::encodeNewest(buf, POS_HEADER_LEN - 1, PREFIX, in.data(), 1,
+                                            &first, &count)) << "no room for a header";
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

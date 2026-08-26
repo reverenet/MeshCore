@@ -247,15 +247,12 @@ private:
   bool handleTrackReport(mesh::Packet* pkt, const uint8_t* data, size_t data_len);
   bool isNewerTrackReport(const uint8_t* prefix, uint32_t timestamp);
 
-#if TRACK_HISTORY > 0
+#if TRACK_ANSWER_HISTORY
   // Answering "where have you been since <instant>?" from a contact who also holds the
   // tracking key. See helpers/PositionHistory.h for the request and response, and
   // AutoAdvert.h for what bounds the answer.
   void startHistoryQuery(const ContactInfo& contact, uint32_t tag, const uint8_t* data, uint8_t len);
   void checkHistoryResponse();   // sends the packets of an answer, one every so often
-
-  PositionSample _hist_buf[TRACK_HISTORY];
-  PositionHistory _hist;
 
   // One answer in flight at a time. A second request replaces it: the alternative is
   // queueing work that a stranger with the tracking key gets to schedule, and each answer
@@ -278,8 +275,13 @@ private:
     return memcmp(ch.secret, _track_channel.secret, sizeof(_track_channel.secret)) == 0;
   }
   AdvertScheduler _track_sampler;
-  PositionSample _track_buf[TRACK_BUFFER];
-  int _track_count;
+
+  // Every sample this node has taken lately, newest last. Sending consumes nothing: a
+  // report is packed from the newest end of this and a history request is answered from
+  // wherever the asker asked, so the two readers never take anything from each other. A
+  // new sample pushes the oldest off, transmitted or not.
+  PositionSample _hist_buf[TRACK_HISTORY];
+  PositionHistory _hist;
 
   // newest report seen per reporter, so a replay can't move a contact backwards. NOT
   // ContactInfo::last_advert_timestamp - that one belongs to advert replay detection.

@@ -29,8 +29,15 @@ struct PositionSample {
  *
  * Batching is what decouples transmit rate from movement. A node samples when it moves
  * but transmits on a fixed cadence, so an observer can no longer infer motion from
- * packet timing. It also means a node that drives out of coverage keeps its samples and
- * flushes the backlog when it returns, instead of losing them.
+ * packet timing.
+ *
+ * A report carries the NEWEST samples that fit, not the oldest waiting ones - see
+ * encodeNewest(). Nothing is consumed by sending: the sender keeps a rolling window of
+ * its recent positions, and each report is a view of the end of it. A receiver that can
+ * see it is missing everything between the last report and this one asks for that stretch
+ * back with a position history request (PositionHistory.h), which is answered from the
+ * same window. That is a better trade than spending a report on old positions while the
+ * newest ones wait: an out-of-date position helps nobody, and the gap is recoverable.
  *
  * Wire format:
  *   [ver 1][pubkey_prefix 6][base_time u32][base_lat i32][base_lon i32][n 1]
@@ -72,6 +79,30 @@ public:
   static int encode(uint8_t* dest, size_t dest_cap,
                     const uint8_t pubkey_prefix[POS_PREFIX_LEN],
                     const PositionSample* samples, int num_samples, int* consumed);
+
+  /**
+   * \brief  Encode the NEWEST samples that will fit, counting back from the end.
+   *
+   * encode() starts at samples[0] and fills forwards, which is what a queue being drained
+   * wants. A report from a rolling window wants the opposite: the last thing anyone needs
+   * is where a node was an hour ago while where it is now waits for the next report.
+   *
+   * Deltas are relative to the sample before, so a step too big to express - more than
+   * about 3.6 km or 18 hours - ends a report. Counting back cannot simply start at
+   * num_samples - capacity and encode: a break part way through that stretch would leave
+   * the report holding the OLDER half and drop exactly the samples this call exists to
+   * carry. So it starts past each break it finds and tries again, and what comes back is
+   * the newest unbroken run that fits.
+   *
+   * \param  first  (OUT) index of the first sample included, so the caller can tell how
+   *                far back the report reaches.
+   * \param  count  (OUT) how many samples went in.
+   * \returns  bytes written, or 0 if nothing could be encoded.
+   */
+  static int encodeNewest(uint8_t* dest, size_t dest_cap,
+                          const uint8_t pubkey_prefix[POS_PREFIX_LEN],
+                          const PositionSample* samples, int num_samples,
+                          int* first, int* count);
 
   /**
    * \brief  Decode a report.

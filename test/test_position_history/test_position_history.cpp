@@ -236,6 +236,73 @@ TEST(PositionHistory, NeitherThresholdKeepsEverything) {
   EXPECT_EQ(10, drain(h, c, got, 16)) << "no thinning asked for is everything, not nothing";
 }
 
+// ----------------------------------------------------------- packing a report from it
+
+TEST(PositionHistory, NewestTakesTheEndOfTheRing) {
+  PositionSample storage[32];
+  PositionHistory h;
+  h.begin(storage, 32);
+
+  for (int i = 0; i < 20; i++) h.add(sample(1000 + i * 60, LAT0, LON0));
+
+  PositionSample got[8];
+  ASSERT_EQ(5, h.newest(got, 5));
+  // oldest-first, because that is the order the report format encodes in
+  EXPECT_EQ(1000u + 15 * 60, got[0].timestamp);
+  EXPECT_EQ(1000u + 19 * 60, got[4].timestamp) << "the last one must be the newest sample";
+}
+
+TEST(PositionHistory, NewestTakesWhatThereIsWhenItIsShort) {
+  PositionSample storage[32];
+  PositionHistory h;
+  h.begin(storage, 32);
+
+  h.add(sample(1000, LAT0, LON0));
+  h.add(sample(1060, LAT0, LON0));
+
+  PositionSample got[8];
+  ASSERT_EQ(2, h.newest(got, 8));
+  EXPECT_EQ(1000u, got[0].timestamp);
+  EXPECT_EQ(1060u, got[1].timestamp);
+
+  PositionHistory empty;
+  empty.begin(storage, 32);
+  EXPECT_EQ(0, empty.newest(got, 8));
+}
+
+TEST(PositionHistory, NewestFollowsTheRingAsItWraps) {
+  PositionSample storage[4];
+  PositionHistory h;
+  h.begin(storage, 4);
+
+  for (int i = 0; i < 10; i++) h.add(sample(1000 + i * 60, LAT0, LON0));
+
+  PositionSample got[8];
+  ASSERT_EQ(3, h.newest(got, 3));
+  EXPECT_EQ(1000u + 7 * 60, got[0].timestamp);
+  EXPECT_EQ(1000u + 9 * 60, got[2].timestamp);
+
+  ASSERT_EQ(4, h.newest(got, 8)) << "never more than the ring holds";
+  EXPECT_EQ(1000u + 6 * 60, got[0].timestamp);
+}
+
+TEST(PositionHistory, SendingNothingChangesWhatIsHeld) {
+  PositionSample storage[8];
+  PositionHistory h;
+  h.begin(storage, 8);
+
+  for (int i = 0; i < 5; i++) h.add(sample(1000 + i * 60, LAT0, LON0));
+
+  PositionSample got[8];
+  h.newest(got, 3);   // as a report would
+  h.newest(got, 3);
+
+  EXPECT_EQ(5, h.count()) << "a report consumes nothing";
+  PositionHistory::Cursor c;
+  h.start(c, reqFor(0, 0, 0));
+  EXPECT_EQ(5, drain(h, c, got, 8)) << "including the ones already broadcast";
+}
+
 // ------------------------------------------------------------------ both thresholds
 //
 // Asked for together they are an OR: a sample is kept as soon as either has been passed,

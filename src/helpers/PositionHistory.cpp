@@ -132,3 +132,16 @@ bool PositionHistory::decodeReqBody(const uint8_t* src, size_t len, PositionHist
 
   return true;
 }
+
+int PositionHistory::newest(PositionSample* dest, int max) const {
+  if (dest == NULL || max <= 0 || _count == 0) return 0;
+
+  int n = (_count < max) ? _count : max;
+  uint32_t seq = _added - (uint32_t)n;   // n back from the end, in absolute terms
+  int out = 0;
+  while (out < n) {
+    if (!getSeq(seq++, dest[out])) break;   // cannot happen: seq is inside the ring
+    out++;
+  }
+  return out;
+}
