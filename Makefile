@@ -138,7 +138,7 @@ ARGUMENTS
                 when the target has none.
 
  network profile - radio and regions
-  CONFIG        profile to read, as NAME = VALUE lines. Default configs/boston.conf.
+  CONFIG        profile to read, as NAME = VALUE lines. Default configs/reverenet.conf.
                 CONFIG= (empty) builds the stock per-variant settings instead. Values in
                 the file are defaults, so passing the same name to make overrides one
                 line without editing it. Keys are rejected there on purpose - a profile
@@ -666,7 +666,7 @@ MEANS_MATCH         := every target is listed
 MEANS_NAME          := the board keeps the name it has - a fresh one names itself
 MEANS_BLE_PIN       := keys/ble.pin if it exists - else the variant pin, or one per boot
 MEANS_BLE_PIN_FILE  := read when it exists - missing is not an error
-MEANS_CONFIG        := configs/boston.conf - CONFIG= builds the stock settings
+MEANS_CONFIG        := configs/reverenet.conf - CONFIG= builds the stock settings
 MEANS_LORA_FREQ     := from the config file - the variant setting without one
 MEANS_LORA_BW       := from the config file - the variant setting without one
 MEANS_LORA_SF       := from the config file - the variant setting without one
@@ -707,7 +707,7 @@ MEANS_erase_firmware_FIRMWARE := required - the target to build the erase image 
 MEANS_erase_firmware_VERSION  := required - baked in like any other build
 MEANS_flash_VERSION           := only needed if nothing is built and it has to build
 MEANS_erase_VERSION           := only needed if no erase image exists and it has to build
-MEANS_flags_CONFIG            := configs/boston.conf - the profile these flags come from
+MEANS_flags_CONFIG            := configs/reverenet.conf - the profile these flags come from
 MEANS_flash_NAME              := every image built for the board is offered - and none is preferred
 MEANS_name_NAME               := required - the name to write to the attached board
 MEANS_firmware_NAME           := no name compiled in - a comma-separated list builds one each
