@@ -139,17 +139,20 @@ ARGUMENTS
                 when the target has none.
 
  network profile - radio and regions
-  CONFIG_DIR    where the network's profiles live, one per kind of node: companion.conf,
-                repeater.conf, room_server.conf, sensor.conf, terminal.conf,
-                kiss_modem.conf. Which one is read follows from FIRMWARE, so a build needs
-                no more than its target name. Default is configs/ under REVERENET_HOME. A
-                missing profile warns and builds the stock per-variant settings, because a
-                fresh clone should still build - CONFIG_DIR= (empty) asks for those and
-                says nothing. examples/configs/sample.conf lists every setting one can
-                carry, and is what to copy for a new network.
-  CONFIG        one profile file, named outright, skipping the lookup - for a build that
-                does not fit the scheme. Unlike a profile found by kind, a file named here
-                has to exist. Values in a profile are defaults, so passing the same name
+  CONFIG_DIR    where the network's profiles live: shared.conf, then one per kind of node
+                - companion.conf, repeater.conf, room_server.conf, sensor.conf,
+                terminal.conf, kiss_modem.conf. shared.conf is read first for every build
+                and holds what the whole network agrees on, above all the radio settings;
+                the profile for the kind is read on top and wins where both set the same
+                name. Which kind follows from FIRMWARE, so a build needs no more than its
+                target name. Default is configs/ under REVERENET_HOME. A missing profile
+                warns and builds the stock per-variant settings, because a fresh clone
+                should still build - CONFIG_DIR= (empty) asks for those and says nothing.
+                examples/configs/sample.conf lists every setting one can carry.
+  CONFIG        one profile file, named outright, skipping the lookup AND shared.conf -
+                for a build that does not fit the scheme, which is usually the build that
+                differs from the network. Unlike a profile found by kind, a file named
+                here has to exist. Values in a profile are defaults, so passing the same name
                 to make overrides one line without editing it. Keys are rejected in a
                 profile on purpose: it gets shared.
   LORA_FREQ     MHz. These four must match the rest of the network exactly. A node that
@@ -374,12 +377,16 @@ REVERENET_HOME ?= $(HOME)/.reverenet
 # file for both is most of a file that does not apply, and every setting in it needs a
 # note saying which builds read it.
 #
+#   $(CONFIG_DIR)/shared.conf        read first, for every kind of node
 #   $(CONFIG_DIR)/companion.conf     built for anything with 'companion' in its name
 #   $(CONFIG_DIR)/repeater.conf      ... 'repeater', including the bridge variants
 #   $(CONFIG_DIR)/room_server.conf   ... and so on for room_server, sensor, terminal
 #
-# The radio settings appear in each of them and have to agree - see the check further
-# down, which is the price of splitting them up.
+# shared.conf holds what the whole network agrees on - the radio settings above all,
+# which every node must match exactly - and the profile for the kind is read on top of
+# it, so a setting in both is decided by the kind. Settings that must agree and are
+# written down once cannot drift apart; the check further down is for the case where a
+# kind file overrides one of them anyway.
 CONFIG_DIR ?= $(REVERENET_HOME)/configs
 
 # CONFIG names one profile outright, for a build that does not fit the scheme - a bench
@@ -398,10 +405,17 @@ NODE_KINDS := companion room_server repeater sensor terminal kiss_modem
 NODE_KIND := $(shell printf %s '$(FIRMWARE)' | tr 'A-Z' 'a-z' \
                | grep -oE '$(subst $() ,|,$(NODE_KINDS))' | head -1)
 
+# Every profile to read, in the order they are read: shared first, the kind on top.
+CONFIG_FILES :=
+
 ifneq ($(strip $(CONFIG)),)
   ifeq ($(wildcard $(CONFIG)),)
     $(error CONFIG=$(CONFIG) does not exist)
   endif
+  # Named outright means named outright: no shared.conf underneath it. A file passed by
+  # hand is usually the one that differs from the network, and quietly mixing the
+  # network's settings into it would be the opposite of what was asked for.
+  CONFIG_FILES := $(CONFIG)
 else ifneq ($(strip $(CONFIG_DIR)),)
   ifneq ($(NODE_KIND),)
     CONFIG := $(CONFIG_DIR)/$(NODE_KIND).conf
@@ -414,6 +428,7 @@ else ifneq ($(strip $(CONFIG_DIR)),)
                 CONFIG_DIR, or pass CONFIG= to say you meant the stock ones)
       CONFIG :=
     endif
+    CONFIG_FILES := $(wildcard $(CONFIG_DIR)/shared.conf) $(CONFIG)
   else ifneq ($(strip $(FIRMWARE)),)
     $(warning $(FIRMWARE) is not a kind of node with a profile - building the stock \
               per-variant settings. Name one with CONFIG=<file> if it needs one)
@@ -438,11 +453,16 @@ ifneq ($(strip $(CONFIG)),)
   endif
 endif
 
-ifneq ($(strip $(CONFIG)),)
+ifneq ($(strip $(CONFIG_FILES)),)
 
   # NAME=VALUE per setting. Values may not contain spaces, which keeps each setting a
   # single word and lets the foreach below walk them.
-  CONFIG_SETTINGS := $(shell sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*$$/\1=\2/p' '$(CONFIG)')
+  #
+  # Both files in one pass, shared first. sed reads them in the order given and the loop
+  # below assigns in the order it reads, so a setting in the kind's profile simply
+  # assigns over the one from shared.conf - which is the precedence wanted, with no
+  # merging logic to get wrong.
+  CONFIG_SETTINGS := $(shell sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*$$/\1=\2/p' $(CONFIG_FILES))
 
   # $(eval) rather than include: a plain assignment still loses to the command line,
   # which is exactly the precedence wanted here.
@@ -450,24 +470,25 @@ ifneq ($(strip $(CONFIG)),)
   # $(call) would split it into arguments and silently keep only the first region.
   $(foreach kv,$(CONFIG_SETTINGS),\
     $(if $(filter TRACKING_KEY,$(firstword $(subst =, ,$(kv)))),\
-      $(error $(CONFIG) sets $(firstword $(subst =, ,$(kv))): keys belong in a key file, \
-              not in a config file that gets shared and committed))\
+      $(error $(firstword $(subst =, ,$(kv))) is set in $(CONFIG_FILES): keys belong in a \
+              key file, not in a profile that gets shared))\
     $(if $(filter $(firstword $(subst =, ,$(kv))),$(CONFIG_ARGS)),,\
-      $(error $(CONFIG): '$(firstword $(subst =, ,$(kv)))' is not a settable argument))\
+      $(error '$(firstword $(subst =, ,$(kv)))' in $(CONFIG_FILES) is not a settable argument))\
     $(eval $(firstword $(subst =, ,$(kv))) := $(word 2,$(subst =, ,$(kv)))))
 endif
 
 $(foreach v,$(RADIO_ARGS),$(if $($(v)),$(if $(call not_a_decimal,$($(v))),\
   $(error $(v) must be a number, got '$($(v))'))))
 
-# One profile per kind of node means the radio settings are written down more than once,
-# and settings that must agree and are kept in two places are settings that eventually
-# disagree. A node built on the wrong spreading factor does not hear the mesh and says
-# nothing about why, so it is worth the four greps to notice here instead.
+# The radio settings belong in shared.conf, where they are written down once and cannot
+# drift. This catches the one way they still can: a kind's profile setting one of them
+# anyway, which reads like a local tweak and is a node that cannot hear the mesh. Every
+# profile in the directory is compared, shared.conf included.
 #
 # A warning rather than an error: a bench profile deliberately on another frequency is a
 # real thing to want, and stopping the build over it would be worse than saying so.
-PROFILE_FILES := $(wildcard $(foreach k,$(NODE_KINDS),$(CONFIG_DIR)/$(k).conf))
+PROFILE_FILES := $(wildcard $(CONFIG_DIR)/shared.conf \
+                   $(foreach k,$(NODE_KINDS),$(CONFIG_DIR)/$(k).conf))
 profile_values = $(shell sed -n 's/^[[:space:]]*$(1)[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*/\1/p' \
                    $(PROFILE_FILES) 2>/dev/null | sort -u)
 ifneq ($(words $(PROFILE_FILES)),1)
@@ -916,8 +937,8 @@ MEANS_MATCH         := every target is listed
 MEANS_NAME          := the board keeps the name it has - a fresh one names itself
 MEANS_BLE_PIN       := the pin file if it exists - else the variant pin, or one per boot
 MEANS_BLE_PIN_FILE  := read when it exists - missing is not an error
-MEANS_CONFIG        := the profile for what is being built, from CONFIG_DIR
-MEANS_CONFIG_DIR    := configs/ under REVERENET_HOME - one profile per kind of node
+MEANS_CONFIG        := shared.conf plus the profile for what is being built
+MEANS_CONFIG_DIR    := configs/ under REVERENET_HOME - shared.conf and one per kind
 MEANS_LORA_FREQ     := from the config file - the variant setting without one
 MEANS_LORA_BW       := from the config file - the variant setting without one
 MEANS_LORA_SF       := from the config file - the variant setting without one
@@ -1145,7 +1166,7 @@ endif
 
 .PHONY: flags
 flags:
-	@echo "config:        $(if $(strip $(CONFIG)),$(CONFIG),none - stock per-variant settings)"
+	@echo "profile:       $(if $(strip $(CONFIG_FILES)),$(CONFIG_FILES),none - stock per-variant settings)"
 	@echo "tracking key:  $(if $(TRACKING_KEY),$(TRACKING_KEY_SOURCE) (fingerprint $(call key_source_fingerprint,TRACKING_KEY)),unset - position reporting is compiled out)"
 	@echo "other flags:   $(if $(strip $(OTHER_ARG_FLAGS)),$(strip $(OTHER_ARG_FLAGS)),none - firmware defaults throughout)"
 ifneq ($(strip $(CHANNELS)),)
