@@ -1166,7 +1166,7 @@ uint32_t MyMesh::getBLEPin() {
 }
 
 // Whether the pin may go on the screen, which is not the same question as whether there
-// is one. A pin compiled into the build is a network secret - it comes from keys/ble.pin,
+// is one. A pin compiled into the build is a network secret - it comes from the pin file,
 // which is kept off command lines and out of CI logs for exactly that reason - and a
 // display hands it to anyone standing near the device, for as long as it is powered.
 //
@@ -3050,7 +3050,7 @@ void MyMesh::checkHistoryResponse() {
 // reporting is a property of the mesh and not of a sensor: routing it through the sensor
 // manager would mean adding the same two settings to every board variant that has one.
 // The build-flag spellings are accepted as aliases, so that one name works everywhere:
-// TRACK_REPORT is what the Makefile, configs/boston.conf and the docs all call this, and
+// TRACK_REPORT is what the Makefile, the network profiles and the docs all call this, and
 // having to remember a second spelling at the command is a good way to set nothing at all
 // and think you set something. Only the canonical names are ever reported back, so the
 // app still sees one setting rather than two that shadow each other.

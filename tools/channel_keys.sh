@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# The channel key file - keys/channels.key by default - and the three things the build
+# The channel key file - keys/channels.key under REVERENET_HOME - and the three things the build
 # needs from it: resolve the named channels into the spec the firmware parses, generate a
 # key for a channel that has none, and fingerprint them so two machines can be compared.
 #

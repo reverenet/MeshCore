@@ -17,8 +17,12 @@ compile_commands.json
 .venv/
 venv/
 platformio.local.ini
-# keys and the BLE pairing pin - the network's shared secrets, and never committed
+# Keys, the BLE pairing pin, and network profiles. All of it lives under REVERENET_HOME
+# now - ~/.reverenet by default - and none of it belongs in a checkout. These stay as a
+# backstop for a directory left over from before that move, or one made by hand: a key
+# that has been committed is not a key any more, and a profile names a real network.
 keys/
+configs/
 *.key
 *.pin
 # erase images are downloaded per board, not built here - see the README in that dir
