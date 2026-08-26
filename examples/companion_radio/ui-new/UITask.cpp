@@ -236,7 +236,7 @@ public:
         display.setTextSize(1);
         display.drawTextCentered(display.width() / 2, 43, "< Connected >");
 
-      } else if (the_mesh.getBLEPin() != 0) { // BT pin
+      } else if (the_mesh.shouldShowBLEPin()) { // BT pin, unless it is the compiled-in one
         display.setColor(UIColor::warning_txt);
         display.setTextSize(2);
         sprintf(tmp, "Pin:%d", the_mesh.getBLEPin());

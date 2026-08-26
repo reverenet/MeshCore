@@ -98,6 +98,7 @@ public:
   const char *getNodeName();
   NodePrefs *getNodePrefs();
   uint32_t getBLEPin();
+  bool shouldShowBLEPin();   // false for the pin compiled in - see MyMesh.cpp
 
   void loop();
   void handleCmdFrame(size_t len);

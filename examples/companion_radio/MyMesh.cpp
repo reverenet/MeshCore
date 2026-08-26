@@ -1076,6 +1076,11 @@ void MyMesh::begin(bool has_display) {
     if (has_display && BLE_PIN_CODE == 123456) {
       StdRNG rng;
       _active_ble_pin = rng.nextInt(100000, 999999); // random pin each session
+      // A session pin is shown BECAUSE it differs from the compiled-in one, so the one
+      // draw that matches it would be hidden - and a pin nobody can read is a device
+      // nobody can pair. Nudged rather than redrawn: a loop here depends on the RNG
+      // eventually disagreeing, and this cannot spin.
+      if (_active_ble_pin == BLE_PIN_CODE) _active_ble_pin++;
     } else {
       _active_ble_pin = BLE_PIN_CODE; // otherwise static pin
     }
@@ -1138,6 +1143,24 @@ NodePrefs *MyMesh::getNodePrefs() {
 }
 uint32_t MyMesh::getBLEPin() {
   return _active_ble_pin;
+}
+
+// Whether the pin may go on the screen, which is not the same question as whether there
+// is one. A pin compiled into the build is a network secret - it comes from keys/ble.pin,
+// which is kept off command lines and out of CI logs for exactly that reason - and a
+// display hands it to anyone standing near the device, for as long as it is powered.
+//
+// The other two kinds have to be shown or nothing could pair with the board: a pin drawn
+// fresh at boot is known to nobody until it is displayed, and one the owner set from the
+// app or the CLI is already theirs. Both differ from the compiled-in value, which is what
+// this tests - so a pin deliberately set back to the build's own is treated as the secret
+// it is, and stays off the screen.
+bool MyMesh::shouldShowBLEPin() {
+#ifdef BLE_PIN_CODE
+  return _active_ble_pin != 0 && _active_ble_pin != BLE_PIN_CODE;
+#else
+  return false;   // no pin compiled in at all, so there is nothing to show
+#endif
 }
 
 struct FreqRange {
