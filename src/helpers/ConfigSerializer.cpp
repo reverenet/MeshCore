@@ -1,5 +1,8 @@
 #include "ConfigSerializer.h"
 
+// atoi/atof, which the Arduino headers happen to drag in and a native build does not
+#include <stdlib.h>
+
 bool ConfigSerializer::saveSerial(Stream& s) {
   Context context(&s, OP::WRITE);
   _context = &context;  // set the context for structure() call
