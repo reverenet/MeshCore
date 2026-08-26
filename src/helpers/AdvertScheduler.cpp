@@ -1,16 +1,9 @@
 #include "AdvertScheduler.h"
-#include <math.h>
-
-// metres per micro-degree of latitude (WGS84 mean, good to ~0.3% anywhere)
-#define MICRODEG_TO_M      0.111320f
-#define DEG_TO_RAD         0.017453292f
+#include "GeoDistance.h"
 
 // recompute the cos(lat) longitude scale only after this much north/south travel;
 // below half a degree the error is far under the accuracy we need for a threshold test
 #define COS_REFRESH_E6     500000
-
-#define LON_FULL_E6        360000000
-#define LON_HALF_E6        180000000
 
 #define MAX_SANE_SECS      86400   // a day; keeps secs*1000 well clear of uint32 overflow
 #define MAX_JITTER_PCT     50
@@ -81,31 +74,19 @@ void AdvertScheduler::refreshCosLat(int32_t lat_e6) {
     if (d < COS_REFRESH_E6) return;
   }
   _cos_ref_lat = lat_e6;
-  _cos_lat = cosf((float)lat_e6 * 1.0e-6f * DEG_TO_RAD);
-  if (_cos_lat < 0.01f) _cos_lat = 0.01f;   // don't let east/west collapse at the poles
+  _cos_lat = GeoDistance::cosLatFor(lat_e6);
   _cos_valid = true;
 }
 
 bool AdvertScheduler::movedFarEnough(int32_t lat_e6, int32_t lon_e6) {
   if (_cfg.dist_threshold_m == 0) return false;   // distance trigger disabled
 
-  int32_t dlat = lat_e6 - _last_lat;
-  int32_t dlon = lon_e6 - _last_lon;
-
-  // take the short way round, so a step across the antimeridian isn't read as
-  // half a planet of travel
-  if (dlon > LON_HALF_E6) dlon -= LON_FULL_E6;
-  else if (dlon < -LON_HALF_E6) dlon += LON_FULL_E6;
-
+  // the cached longitude scale is the only reason this isn't a bare call: poll() runs
+  // once a second, and the cache is what keeps a cosf() out of that path
   refreshCosLat(lat_e6);
 
-  // equirectangular is ample for a threshold test and costs no sqrt and no per-call
-  // trig - we only care whether we're inside or outside a small circle
-  float dy = (float)dlat * MICRODEG_TO_M;
-  float dx = (float)dlon * MICRODEG_TO_M * _cos_lat;
-  float thresh = (float)_cfg.dist_threshold_m;
-
-  return (dx * dx + dy * dy) >= (thresh * thresh);
+  return GeoDistance::movedAtLeast(_last_lat, _last_lon, lat_e6, lon_e6,
+                                   _cos_lat, _cfg.dist_threshold_m);
 }
 
 void AdvertScheduler::markSent(uint32_t now_ms, int32_t lat_e6, int32_t lon_e6) {
