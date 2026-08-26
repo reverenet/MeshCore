@@ -584,8 +584,13 @@ endif
 # combinations that build cleanly but don't do what they look like they do
 ifeq ($(TRACKING_KEY),)
   ifeq ($(TRACK_REPORT),1)
-    $(error TRACK_REPORT=1 needs TRACKING_KEY, without it the tracking code is not \
-            compiled in and the node reports nothing)
+    # exempt for the same reason the missing-channel-key error is: 'make keys' is what
+    # generates the key this is complaining about, so it has to be able to run without it,
+    # and 'help' and 'flags' report rather than build.
+    ifeq ($(filter keys help flags,$(MAKECMDGOALS)),)
+      $(error TRACK_REPORT=1 needs TRACKING_KEY, without it the tracking code is not \
+              compiled in and the node reports nothing)
+    endif
   endif
 endif
 ifneq ($(strip $(AUTO_ADVERT_LOC_MIN_SECS)$(AUTO_ADVERT_LOC_MAX_SECS)$(AUTO_ADVERT_LOC_DIST_M)$(AUTO_ADVERT_LOC_BACKOFF)$(AUTO_ADVERT_LOC_JITTER_PCT)$(AUTO_ADVERT_LOC_STARTUP_SECS)),)
