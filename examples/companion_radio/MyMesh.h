@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <Mesh.h>
 #include <helpers/AdvertScheduler.h>
+#include <helpers/ChannelConfig.h>
 #include <helpers/PositionReport.h>
 #include "AbstractUITask.h"
 #include "AutoAdvert.h"
@@ -207,6 +208,9 @@ private:
   }
 
   void checkCLIRescueCmd();
+#if defined(AUTO_CHANNELS) && defined(MAX_GROUP_CHANNELS)
+  void addConfiguredChannels();   // the channels this build was given (see the Makefile)
+#endif
   void checkSerialInterface();
   bool isValidClientRepeatFreq(uint32_t f) const;
 

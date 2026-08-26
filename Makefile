@@ -75,8 +75,9 @@ COMMANDS
       On ESP32 with neither, falls back to esptool's own flash erase.
 
   make keys
-      Generate the tracking key file. Never writes over one that already exists, and
-      prints its fingerprint so two machines can be checked for agreement.
+      Generate the tracking key file, and a key for every channel named in CHANNELS that
+      does not have one yet. Never writes over a key that already exists, and prints a
+      fingerprint for each so two machines can be checked for agreement.
 
   make flags
       Show how every argument resolves for the build that would run. Key material is
@@ -155,8 +156,18 @@ ARGUMENTS
                 is configured, so it will not undo an operator's saved setup.
   DEFAULT_FLOOD_SCOPE_NAME
                 single scope, which is what the room server and sensor take instead.
+  CHANNELS      comma-separated group channels the node creates for itself, e.g. ops,sar,
+                so a device arrives already on the network instead of every owner pasting
+                the same PSKs into the app. Companion only. Names only - letters, digits,
+                dot, underscore and dash, at most 31 of them - because the key for each
+                comes from CHANNELS_KEY_FILE, which is not committed and not shared as
+                widely. A channel is added only when the device does not already have it,
+                matched on the key rather than the name: renaming one in the app sticks,
+                deleting one there brings it back on the next boot. The built-in Public
+                channel counts against the target's channel slots, so a target that
+                cannot hold them all fails to build rather than dropping one quietly.
 
- keys - the shared secret of a tracking group
+ keys - the shared secrets of the network
   TRACKING_KEY  32 hex characters used as the raw AES-128 key, or any other string, which
                 is hashed into one. Unset compiles position tracking out entirely. Only
                 the nodes that may read a position need it: repeaters relay reports
@@ -167,6 +178,15 @@ ARGUMENTS
                 file is not an error - it just builds without the feature - but a file
                 named explicitly has to exist. Use these to keep several networks side
                 by side.
+  CHANNELS_KEY_FILE
+                one key per channel named in CHANNELS. Default keys/channels.key, as
+                NAME = KEY lines with # comments ignored. A key is 32 hex characters - the
+                raw AES-128 key, and what 'make keys' writes - or a base64 PSK ending in
+                '=', which is how MeshCore shares a channel, or any other string, which is
+                hashed into a key. 128-bit throughout: the app protocol carries 16 bytes
+                of channel secret, so a 256-bit key is refused rather than truncated.
+                A channel named in CHANNELS with no key here stops the build; 'make keys'
+                is what fills it in.
 
  GPS
   GPS_ENABLED   whether the receiver is switched on at first boot. 1 on the companion,
@@ -281,7 +301,7 @@ STRING_ARGS := DEFAULT_REGIONS DEFAULT_FLOOD_SCOPE_NAME
 # cannot do. See the flash recipe.
 BUILD_ARGS := $(NUMERIC_ARGS) $(RADIO_ARGS) $(STRING_ARGS) \
   BLE_PIN BLE_PIN_CODE BLE_PIN_FILE CONFIG AUTO_ADVERT_LOC_POLICY \
-  TRACKING_KEY TRACKING_KEY_FILE KEYS_DIR
+  TRACKING_KEY TRACKING_KEY_FILE KEYS_DIR CHANNELS CHANNELS_KEY_FILE
 CMDLINE_BUILD_ARGS = $(strip $(foreach v,$(BUILD_ARGS),\
   $(if $(filter command line,$(origin $(v))),$(v))))
 
@@ -303,7 +323,7 @@ not_a_decimal = $(shell printf %s '$(1)' | grep -qE '^[0-9]+(\.[0-9]+)?$$' || ec
 # CONFIG= (empty) builds the stock per-variant settings instead.
 CONFIG ?= configs/reverenet.conf
 
-CONFIG_ARGS := $(RADIO_ARGS) $(STRING_ARGS) $(NUMERIC_ARGS) AUTO_ADVERT_LOC_POLICY
+CONFIG_ARGS := $(RADIO_ARGS) $(STRING_ARGS) $(NUMERIC_ARGS) AUTO_ADVERT_LOC_POLICY CHANNELS
 
 ifneq ($(strip $(CONFIG)),)
   ifeq ($(wildcard $(CONFIG)),)
@@ -408,6 +428,12 @@ TRACKING_KEY_FILE ?= $(KEYS_DIR)/tracking.key
 # missing default file being an ordinary build rather than an error.
 BLE_PIN_FILE ?= $(KEYS_DIR)/ble.pin
 
+# One key per channel named in CHANNELS, as NAME = KEY lines - a different shape from the
+# single-value files above, because the names are public and belong in the profile while
+# the keys are not and belong here. 'make keys' fills in any channel that has no key yet,
+# and tools/channel_keys.sh documents the file. Like the others, KEYS_DIR moves it.
+CHANNELS_KEY_FILE ?= $(KEYS_DIR)/channels.key
+
 # A key file is one line of 32 hex characters. Lines starting with # are ignored, so a
 # generated file can carry a header saying what it is and when it was made.
 # NOTE: the \# is not decoration - an unescaped # would end the make variable here, and
@@ -487,6 +513,61 @@ ifneq ($(TRACKING_KEY),)
             backticks, commas or $$)
   endif
   KEY_ARG_FLAGS += -DTRACKING_KEY='"$(TRACKING_KEY)"'
+endif
+
+# ------------------------------------------------------------------ group channels
+#
+# Channels the firmware creates for itself, so a node comes out of the box already on the
+# network's channels instead of every owner pasting the same PSKs into the app. The names
+# come from the profile, which is shared and committed; the keys come from the key file,
+# which is neither. Companion builds only - nothing else keeps a channel list.
+#
+# The two are joined here rather than on the device: what reaches the firmware is one
+# AUTO_CHANNELS string of name:hex pairs, already resolved and normalised, so the parser
+# on the other end only has to read hex. tools/channel_keys.sh holds the file format and
+# does the resolving; it answers in one line so this works on make 3.81, which cannot see
+# the exit status of a $(shell).
+CHANNEL_NAMES := $(subst $(comma), ,$(CHANNELS))
+
+ifneq ($(strip $(CHANNELS)),)
+  # The name is compiled into a string flag and shown in the app, so it may not carry a
+  # space, a comma or a colon - the separators the flag itself uses. 31 bytes is what
+  # ChannelDetails::name holds.
+  $(foreach n,$(CHANNEL_NAMES),\
+    $(if $(shell printf %s '$(n)' | grep -qE '^[A-Za-z0-9._-]{1,31}$$' || echo bad),\
+      $(error CHANNELS: '$(n)' is not a usable channel name - letters, digits, dot, \
+              underscore and dash, at most 31 of them. A key never goes here, only a \
+              name - the key for it goes in $(CHANNELS_KEY_FILE))))
+
+  ifneq ($(words $(CHANNEL_NAMES)),$(words $(sort $(CHANNEL_NAMES))))
+    $(error CHANNELS names the same channel twice: $(CHANNELS))
+  endif
+
+  # one line: the resolved spec, 'missing:' and the names that have no key, or 'error:'
+  CHANNELS_SPEC := $(shell tools/channel_keys.sh spec '$(CHANNELS_KEY_FILE)' '$(CHANNELS)' 2>&1)
+
+  ifneq ($(filter error:,$(CHANNELS_SPEC)),)
+    $(error $(CHANNELS_SPEC))
+  endif
+endif
+
+ifneq ($(filter missing:,$(CHANNELS_SPEC)),)
+  CHANNELS_MISSING := $(filter-out missing:,$(CHANNELS_SPEC))
+endif
+
+ifneq ($(strip $(CHANNELS_MISSING)),)
+  # 'make keys' is the fix, so it has to be able to run: it would be a poor build system
+  # that made the command which generates the missing key refuse to start without it.
+  # 'help' and 'flags' report rather than build, and say the same thing more usefully.
+  ifeq ($(filter keys help flags,$(MAKECMDGOALS)),)
+    $(error no key for $(CHANNELS_MISSING) in $(CHANNELS_KEY_FILE) - run 'make keys' to \
+            generate one, or copy the file from a node already on those channels)
+  endif
+else ifneq ($(strip $(CHANNELS_SPEC)),)
+  KEY_ARG_FLAGS += -DAUTO_CHANNELS='"$(CHANNELS_SPEC)"'
+  # The count is what lets the firmware size its array and refuse, at compile time, to
+  # build a target whose MAX_GROUP_CHANNELS cannot hold them all.
+  KEY_ARG_FLAGS += -DAUTO_CHANNELS_COUNT=$(words $(CHANNEL_NAMES))
 endif
 
 # accept the short forms as well as the macro names the firmware uses
@@ -596,9 +677,10 @@ names a board that is not the one expected.
 endef
 
 define ABOUT_keys
-Generate the tracking key file, and print its fingerprint so two machines can be
-checked for agreement. Never writes over a key that already exists: the key IS the
-group, so replacing it would cut a node off from every node already flashed.
+Generate the tracking key file, and a key for every channel named in CHANNELS that
+has none yet. Prints a fingerprint for each, so two machines can be checked for
+agreement. Never writes over a key that already exists: the key IS the group, so
+replacing one would cut a node off from every node already flashed.
 endef
 
 define ABOUT_flags
@@ -622,7 +704,8 @@ export ABOUT_firmware ABOUT_flash ABOUT_erase ABOUT_erase_firmware ABOUT_detect 
 # Which settings each command reads. Everything that changes the binary is grouped, since
 # the commands that build read all of it and the commands that do not read none of it.
 BUILD_SETTINGS := NAME BLE_PIN BLE_PIN_FILE CONFIG $(RADIO_ARGS) $(STRING_ARGS) \
-  TRACKING_KEY TRACKING_KEY_FILE KEYS_DIR GPS_ENABLED GPS_INTERVAL \
+  TRACKING_KEY TRACKING_KEY_FILE KEYS_DIR CHANNELS CHANNELS_KEY_FILE \
+  GPS_ENABLED GPS_INTERVAL \
   TRACK_REPORT TRACK_REPORT_SECS TRACK_SAMPLE_MIN_SECS TRACK_SAMPLE_MAX_SECS \
   TRACK_SAMPLE_DIST_M TRACK_BUFFER TRACK_FLOOD \
   AUTO_ADVERT_SECS AUTO_ADVERT_FLOOD AUTO_ADVERT_LOC AUTO_ADVERT_LOC_POLICY \
@@ -636,7 +719,7 @@ SETTINGS_erase          := FIRMWARE VERSION BINARIES_DIR ERASE_UF2 PORT YES
 SETTINGS_erase_firmware := FIRMWARE VERSION BINARIES_DIR
 SETTINGS_name           := NAME PORT YES
 SETTINGS_detect         := PORT
-SETTINGS_keys           := KEYS_DIR TRACKING_KEY_FILE BLE_PIN_FILE
+SETTINGS_keys           := KEYS_DIR TRACKING_KEY_FILE BLE_PIN_FILE CHANNELS CHANNELS_KEY_FILE CONFIG
 SETTINGS_flags          := $(BUILD_SETTINGS)
 SETTINGS_firmwares      := MATCH
 SETTINGS_list           := MATCH
@@ -677,6 +760,8 @@ MEANS_DEFAULT_FLOOD_SCOPE_NAME := a room server or sensor starts with no scope
 MEANS_TRACKING_KEY  := position reporting is compiled out entirely
 MEANS_TRACKING_KEY_FILE := read when it exists - missing is not an error
 MEANS_KEYS_DIR      := where make keys writes and the key file is looked for
+MEANS_CHANNELS      := only the built-in Public channel - the app adds the rest by hand
+MEANS_CHANNELS_KEY_FILE := where the key for each channel in CHANNELS is read from
 MEANS_GPS_ENABLED   := firmware default - on for a companion off for a repeater
 MEANS_GPS_INTERVAL  := firmware default 0 - the sensor cadence of once a second
 MEANS_TRACK_REPORT  := first-boot default 0 - tracks are displayed but not reported
@@ -872,12 +957,28 @@ $(TRACKING_KEY_FILE):
 keys: $(TRACKING_KEY_FILE)
 	@echo "tracking key:  $(TRACKING_KEY_FILE) (fingerprint $$($(call key_file_cmd,$(TRACKING_KEY_FILE)) | tr -d '\n' | shasum -a 256 | cut -c1-8))"
 	@echo "copy it to every node that may read a position, then compare fingerprints"
+# Channel keys are per channel and the file is edited by hand as often as it is generated,
+# so this fills in what is missing rather than owning the file: a channel that already has
+# a key keeps it, for the same reason the tracking key is never rewritten.
+ifneq ($(strip $(CHANNELS)),)
+	@echo
+	@tools/channel_keys.sh generate '$(CHANNELS_KEY_FILE)' '$(CHANNELS)'
+	@echo "channel keys:  $(CHANNELS_KEY_FILE)"
+	@tools/channel_keys.sh print '$(CHANNELS_KEY_FILE)' '$(CHANNELS)'
+	@echo "copy it to every node on these channels, then compare fingerprints"
+endif
 
 .PHONY: flags
 flags:
 	@echo "config:        $(if $(strip $(CONFIG)),$(CONFIG),none - stock per-variant settings)"
 	@echo "tracking key:  $(if $(TRACKING_KEY),$(TRACKING_KEY_SOURCE) (fingerprint $(call key_source_fingerprint,TRACKING_KEY)),unset - position reporting is compiled out)"
 	@echo "other flags:   $(if $(strip $(OTHER_ARG_FLAGS)),$(strip $(OTHER_ARG_FLAGS)),none - firmware defaults throughout)"
+ifneq ($(strip $(CHANNELS)),)
+	@echo "channels:      $(CHANNELS) (keys from $(CHANNELS_KEY_FILE))"
+	@tools/channel_keys.sh print '$(CHANNELS_KEY_FILE)' '$(CHANNELS)'
+else
+	@echo "channels:      none - a node starts on the built-in Public channel alone"
+endif
 ifneq ($(NAME_IS_LIST),)
 	@printf '%s\n' $(call shq,names:         $(NAME))
 	@echo "               one build per name, so the flags above are what each of them gets"

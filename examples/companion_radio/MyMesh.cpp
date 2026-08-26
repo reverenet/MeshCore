@@ -108,6 +108,18 @@
 
 #define PUBLIC_GROUP_PSK                "izOH6cXN6mrJ5e26oRXNcg=="
 
+// Channels compiled in from the network profile - the CHANNELS argument in the Makefile,
+// arriving here as one already-resolved AUTO_CHANNELS string. Caught at compile time
+// because the alternative is a device that quietly comes up on some of its network's
+// channels: MAX_GROUP_CHANNELS is per variant, and the built-in Public channel above
+// takes one of the slots before any of these do.
+#if defined(AUTO_CHANNELS) && !defined(MAX_GROUP_CHANNELS)
+  #error "CHANNELS was set, but this target has no group channels to put them in"
+#endif
+#if defined(AUTO_CHANNELS) && (AUTO_CHANNELS_COUNT + 1 > MAX_GROUP_CHANNELS)
+  #error "CHANNELS names more channels than this target can hold, counting the Public channel"
+#endif
+
 // these are _pushed_ to client app at any time
 #define PUSH_CODE_ADVERT                0x80
 #define PUSH_CODE_PATH_UPDATED          0x81
@@ -940,6 +952,65 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
 #endif
 }
 
+#if defined(AUTO_CHANNELS) && defined(MAX_GROUP_CHANNELS)
+
+// Put this build's channels on the device, so a node arrives on its network's channels
+// rather than every owner pasting the same PSKs into the app.
+//
+// Runs after the saved channels are loaded, not before, and adds only what is missing.
+// Doing it the other way round - the way the Public channel above is seeded - would not
+// survive: loadChannels() writes over every slot from index 0, so a channel added before
+// it is simply overwritten by whatever the app last saved, including an empty slot.
+//
+// A channel is matched by its key rather than its name. Renaming one in the app is a
+// change to a channel this node already has, so it sticks; deleting one is not, so it
+// comes back on the next boot. That is the intended asymmetry: the profile decides which
+// channels a node is on, and the owner decides what they are called.
+void MyMesh::addConfiguredChannels() {
+  ChannelConfigEntry configured[AUTO_CHANNELS_COUNT];
+  int num = ChannelConfig::parse(AUTO_CHANNELS, configured, AUTO_CHANNELS_COUNT);
+  if (num < 0) {
+    MESH_DEBUG_PRINTLN("addConfiguredChannels: AUTO_CHANNELS is malformed, no channels added");
+    return;
+  }
+
+  bool changed = false;
+  for (int i = 0; i < num; i++) {
+    mesh::GroupChannel probe;
+    memset(&probe, 0, sizeof(probe));
+    memcpy(probe.secret, configured[i].secret, CHANNEL_CONFIG_SECRET_LEN);
+
+    if (findChannelIdx(probe) >= 0) continue;   // already on this channel, under whatever name
+
+    // the first slot with an all-zero secret, which is what an unused one holds
+    mesh::GroupChannel empty;
+    memset(&empty, 0, sizeof(empty));
+    int slot = findChannelIdx(empty);
+    if (slot < 0) {
+      // only reachable once the owner has filled the device up themselves - the build
+      // refuses a profile that cannot fit
+      MESH_DEBUG_PRINTLN("addConfiguredChannels: no free slot for '%s'", configured[i].name);
+      break;
+    }
+
+    ChannelDetails ch;
+    memset(&ch, 0, sizeof(ch));
+    StrHelper::strncpy(ch.name, configured[i].name, sizeof(ch.name));
+    // the top 16 bytes stay zero, which is how setChannel() knows this is a 128-bit key
+    memcpy(ch.channel.secret, configured[i].secret, CHANNEL_CONFIG_SECRET_LEN);
+
+    if (setChannel(slot, ch)) {
+      MESH_DEBUG_PRINTLN("addConfiguredChannels: added '%s' as channel %d", ch.name, slot);
+      changed = true;
+    }
+  }
+
+  // only when something was actually added, so the steady state is no flash write at all
+  if (changed) saveChannels();
+}
+
+#endif
+
 void MyMesh::begin(bool has_display) {
   BaseChatMesh::begin();
 
@@ -1023,6 +1094,9 @@ void MyMesh::begin(bool has_display) {
   bootstrapRTCfromContacts();
   addChannel("Public", PUBLIC_GROUP_PSK); // pre-configure Andy's public channel
   _store->loadChannels(this);
+#if defined(AUTO_CHANNELS) && defined(MAX_GROUP_CHANNELS)
+  addConfiguredChannels();
+#endif
 
   radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
   radio_driver.setTxPower(_prefs.tx_power_dbm);
