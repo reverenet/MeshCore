@@ -211,6 +211,22 @@ ARGUMENTS
   TRACK_SAMPLE_MIN_SECS, TRACK_SAMPLE_MAX_SECS, TRACK_SAMPLE_DIST_M
                 how often position is sampled, and how far it must move to force one.
   TRACK_FLOOD   0 = zero-hop (default), 1 = scoped flood.
+  TRACK_HISTORY how many recent samples the node holds, 12 bytes of RAM each. This is the
+                whole store: reports are packed from the newest end of it and a history
+                request is answered out of it, and neither consumes anything. Sizing it is
+                about how far back somebody can ASK - a report carries the newest 23
+                positions however deep this is.
+  TRACK_ANSWER_HISTORY
+                0 builds a node that reports on its cadence and will not answer a history
+                request. Unanswered looks the same as never having heard of them.
+  TRACK_HISTORY_MAX_PKTS, TRACK_HISTORY_GAP_MS, TRACK_HISTORY_MIN_GAP_SECS
+                what bounds one answer: how many packets it may take, how far apart
+                they go out, and the least time between two answers. All three exist
+                because the airtime is spent by this node at somebody else's say-so.
+  TRACK_PUSH_REPORTS
+                1 hands a position report to the connected client as it arrives, still
+                encrypted, so a client with the tracking key sees every position in the
+                batch. 0 leaves it with the one position the contact record holds.
 
  advert scheduling - companion only
   AUTO_ADVERT_SECS, AUTO_ADVERT_FLOOD
@@ -278,6 +294,8 @@ NUMERIC_ARGS := \
   GPS_ENABLED GPS_INTERVAL \
   TRACK_REPORT TRACK_REPORT_SECS TRACK_SAMPLE_MIN_SECS TRACK_SAMPLE_MAX_SECS \
   TRACK_SAMPLE_DIST_M TRACK_FLOOD \
+  TRACK_HISTORY TRACK_ANSWER_HISTORY TRACK_HISTORY_MAX_PKTS TRACK_HISTORY_GAP_MS \
+  TRACK_HISTORY_MIN_GAP_SECS TRACK_PUSH_REPORTS \
   AUTO_ADVERT_SECS AUTO_ADVERT_FLOOD \
   AUTO_ADVERT_LOC AUTO_ADVERT_LOC_MIN_SECS AUTO_ADVERT_LOC_MAX_SECS \
   AUTO_ADVERT_LOC_DIST_M AUTO_ADVERT_LOC_BACKOFF AUTO_ADVERT_LOC_JITTER_PCT \
@@ -722,6 +740,8 @@ BUILD_SETTINGS := NAME BLE_PIN BLE_PIN_FILE CONFIG $(RADIO_ARGS) $(STRING_ARGS) 
   GPS_ENABLED GPS_INTERVAL \
   TRACK_REPORT TRACK_REPORT_SECS TRACK_SAMPLE_MIN_SECS TRACK_SAMPLE_MAX_SECS \
   TRACK_SAMPLE_DIST_M TRACK_FLOOD \
+  TRACK_HISTORY TRACK_ANSWER_HISTORY TRACK_HISTORY_MAX_PKTS TRACK_HISTORY_GAP_MS \
+  TRACK_HISTORY_MIN_GAP_SECS TRACK_PUSH_REPORTS \
   AUTO_ADVERT_SECS AUTO_ADVERT_FLOOD AUTO_ADVERT_LOC AUTO_ADVERT_LOC_POLICY \
   AUTO_ADVERT_LOC_MIN_SECS AUTO_ADVERT_LOC_MAX_SECS AUTO_ADVERT_LOC_DIST_M \
   AUTO_ADVERT_LOC_BACKOFF AUTO_ADVERT_LOC_JITTER_PCT AUTO_ADVERT_LOC_STARTUP_SECS \
@@ -784,6 +804,12 @@ MEANS_TRACK_SAMPLE_MIN_SECS := firmware default 60s - fastest sampling while mov
 MEANS_TRACK_SAMPLE_MAX_SECS := firmware default 3600s - slowest once parked
 MEANS_TRACK_SAMPLE_DIST_M := firmware default 100m of travel forces a sample
 MEANS_TRACK_FLOOD   := firmware default 0 - zero-hop
+MEANS_TRACK_HISTORY := firmware default 256 samples held - 12 bytes of RAM each
+MEANS_TRACK_ANSWER_HISTORY := firmware default 1 - history requests are answered
+MEANS_TRACK_HISTORY_MAX_PKTS := firmware default 6 packets - about 138 positions
+MEANS_TRACK_HISTORY_GAP_MS := firmware default 3000ms between packets of one answer
+MEANS_TRACK_HISTORY_MIN_GAP_SECS := firmware default 15s between answers whoever asked
+MEANS_TRACK_PUSH_REPORTS := firmware default 1 - reports go up to the client whole
 MEANS_AUTO_ADVERT_SECS := firmware default 0 - no periodic advert
 MEANS_AUTO_ADVERT_FLOOD := firmware default 0 - zero-hop
 MEANS_AUTO_ADVERT_LOC := firmware default 0 - the location beacon is off
