@@ -4,6 +4,7 @@
 #include <Mesh.h>
 #include <helpers/AdvertScheduler.h>
 #include <helpers/ChannelConfig.h>
+#include <helpers/PositionHistory.h>
 #include <helpers/PositionReport.h>
 #include "AbstractUITask.h"
 #include "AutoAdvert.h"
@@ -79,6 +80,8 @@
 #define REQ_TYPE_GET_STATUS             0x01 // same as _GET_STATS
 #define REQ_TYPE_KEEP_ALIVE             0x02
 #define REQ_TYPE_GET_TELEMETRY_DATA     0x03
+// REQ_TYPE_GET_POSITION_HISTORY (0x04) is declared with the rest of that request, in
+// helpers/PositionHistory.h - the asking end of it is not this firmware.
 
 struct AdvertPath {
   uint8_t pubkey_prefix[7];
@@ -243,6 +246,32 @@ private:
   void flushTrackReport();
   bool handleTrackReport(const uint8_t* data, size_t data_len);
   bool isNewerTrackReport(const uint8_t* prefix, uint32_t timestamp);
+
+#if TRACK_HISTORY > 0
+  // Answering "where have you been since <instant>?" from a contact who also holds the
+  // tracking key. See helpers/PositionHistory.h for the request and response, and
+  // AutoAdvert.h for what bounds the answer.
+  void startHistoryQuery(const ContactInfo& contact, uint32_t tag, const uint8_t* data, uint8_t len);
+  void checkHistoryResponse();   // sends the packets of an answer, one every so often
+
+  PositionSample _hist_buf[TRACK_HISTORY];
+  PositionHistory _hist;
+
+  // One answer in flight at a time. A second request replaces it: the alternative is
+  // queueing work that a stranger with the tracking key gets to schedule, and each answer
+  // is already capped and paced. An abandoned answer is not silent - its packets carry a
+  // sequence number and only the final one is flagged as last, so an asker that stops
+  // receiving knows it was cut off rather than finished.
+  bool     _hist_active;
+  uint8_t  _hist_peer[PUB_KEY_SIZE];   // who asked; looked up again at each send
+  uint32_t _hist_tag;                  // their request tag, echoed in every packet
+  PositionHistory::Cursor _hist_cursor;
+  uint8_t  _hist_seq;
+  uint8_t  _hist_pkts;
+  unsigned long _next_hist_pkt;
+  unsigned long _hist_deadline;        // when to give up on an answer that is not progressing
+  unsigned long _hist_next_ok;         // earliest next answer, for TRACK_HISTORY_MIN_GAP_SECS
+#endif
 
   mesh::GroupChannel _track_channel;   // deliberately NOT in channels[], so the app never lists it
   bool isTrackingChannel(const mesh::GroupChannel& ch) const {

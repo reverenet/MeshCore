@@ -674,6 +674,16 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
 
 uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_timestamp, const uint8_t *data,
                                  uint8_t len, uint8_t *reply) {
+#if defined(TRACKING_KEY) && TRACK_HISTORY > 0
+  if (data[0] == REQ_TYPE_GET_POSITION_HISTORY) {
+    // No inline reply. One reply is what this hook can return, and the answer is a series
+    // - so all of it goes out from checkHistoryResponse(), where the packets can be paced
+    // and counted, rather than the first one leaving here and the rest somewhere else.
+    startHistoryQuery(contact, sender_timestamp, data, len);
+    return 0;
+  }
+#endif
+
   if (data[0] == REQ_TYPE_GET_TELEMETRY_DATA) {
     uint8_t permissions = 0;
     uint8_t cp = contact.flags >> 1; // LSB used as 'favourite' bit (so only use upper bits)
@@ -782,7 +792,16 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     i += (len - 4);
     _serial->writeFrame(out_frame, i);
   } else if (len > 4 && tag == pending_req) {  // check for matching response tag
-    pending_req = 0;
+    // A position history answer is several responses under one tag, so the tag has to
+    // stay armed until the last of them - clearing it on the first would push one packet
+    // to the client and drop the rest of the track.
+    //
+    // Deliberately not behind TRACKING_KEY: this node is only relaying the packets, and
+    // the client that asked is the one that can read them. A node with no tracking key of
+    // its own can still be the radio for a client that has one.
+    bool more_to_come = (len > 6 && data[4] == RESP_TYPE_POSITION_HISTORY
+                                 && (data[6] & POS_HIST_FLAG_LAST) == 0);
+    if (!more_to_come) pending_req = 0;
 
     int i = 0;
     out_frame[i++] = PUSH_CODE_BINARY_RESPONSE;
@@ -2437,6 +2456,9 @@ void MyMesh::loop() {
   checkAutoAdverts();
 #ifdef TRACKING_KEY
   checkTracking();
+#if TRACK_HISTORY > 0
+  checkHistoryResponse();
+#endif
 #endif
 
 #ifdef DISPLAY_CLASS
@@ -2517,6 +2539,13 @@ void MyMesh::initTracking() {
                       _track_channel.secret, 32);
 
   _track_seen_count = 0;
+
+#if TRACK_HISTORY > 0
+  _hist.begin(_hist_buf, TRACK_HISTORY);
+  _hist_active = false;
+  _hist_next_ok = futureMillis(0);   // the first request is answerable straight away
+#endif
+
   resetTrackReporting();
 }
 
@@ -2718,6 +2747,12 @@ void MyMesh::checkTracking() {
       s.timestamp = getRTCClock()->getCurrentTime();
       s.lat_e6 = (int32_t)(lat * 1000000.0);
       s.lon_e6 = (int32_t)(lon * 1000000.0);
+#if TRACK_HISTORY > 0
+      // The same sample again, kept for anyone who asks where we have been. The buffer
+      // above is drained on every report, so by the time a question arrives it is usually
+      // empty - the ring is what makes the answer possible at all.
+      _hist.add(s);
+#endif
     }
   }
 
@@ -2792,6 +2827,172 @@ void MyMesh::flushTrackReport() {
     _track_count -= consumed;
   }
 }
+
+#if TRACK_HISTORY > 0
+
+// What one response packet may carry. The ceiling is createDatagram's: a contact datagram
+// holds MAX_PACKET_PAYLOAD once the MAC and the cipher's block padding are paid for.
+#define POS_HIST_RESP_MAX     (MAX_PACKET_PAYLOAD - CIPHER_MAC_SIZE - (CIPHER_BLOCK_SIZE - 1))
+#define POS_HIST_REPORT_BUDGET (POS_HIST_RESP_MAX - POS_HIST_RESP_HEADER_LEN)
+
+// Accept a request, or decide not to. Nothing is sent from here: the answer is one or more
+// packets and they go out from checkHistoryResponse(), paced, so that receiving a request
+// never turns into a burst of transmissions inside a receive callback.
+//
+// Every refusal below is silent. That is deliberate - answering "no" to an unauthenticated
+// request is itself an answer, and tells whoever sent it that a node is here, holds the
+// tracking key, and is listening. The asker sees a request that goes unanswered, which is
+// what a node that has never heard of this request type looks like too.
+void MyMesh::startHistoryQuery(const ContactInfo& contact, uint32_t tag, const uint8_t* data, uint8_t len) {
+  if (len < POS_HIST_REQ_LEN) {
+    MESH_DEBUG_PRINTLN("startHistoryQuery: runt request, len=%d", (uint32_t)len);
+    return;
+  }
+
+  const uint8_t* nonce = &data[1];
+  uint8_t body[POS_HIST_REQ_BODY_LEN];
+  memcpy(body, &data[1 + POS_NONCE_LEN], sizeof(body));
+  PositionReport::whiten(_track_channel.secret, nonce, body, sizeof(body));
+
+  // The nonce is derived from the plaintext and the tracking secret, so recomputing it
+  // over what came out is what says the sender held that key. This is the check the
+  // pairwise encryption cannot make: a contact is somebody this node has paired with,
+  // which is not the same as somebody in the tracking group, and only the group may ask
+  // where it has been.
+  uint8_t expect[POS_NONCE_LEN];
+  PositionReport::deriveNonce(_track_channel.secret, body, sizeof(body), expect);
+  if (memcmp(expect, nonce, POS_NONCE_LEN) != 0) {
+    MESH_DEBUG_PRINTLN("startHistoryQuery: not from the tracking group, ignored");
+    return;
+  }
+
+  PositionHistoryReq req;
+  if (!PositionHistory::decodeReqBody(body, sizeof(body), req)) {
+    MESH_DEBUG_PRINTLN("startHistoryQuery: version or mode this build cannot answer");
+    return;
+  }
+
+  // Rate limit, measured between the starts of two answers. The tracking key check stops
+  // a stranger asking; it does nothing about the same valid request being replayed, and
+  // an answer is up to TRACK_HISTORY_MAX_PKTS of this node's airtime.
+  //
+  // On millis() rather than the RTC: this has to hold on a node whose clock has never been
+  // set, and an RTC reading zero for every request is a rate limit that never triggers.
+  if (!millisHasNowPassed(_hist_next_ok)) {
+    MESH_DEBUG_PRINTLN("startHistoryQuery: asked again too soon, ignored");
+    return;
+  }
+  _hist_next_ok = futureMillis((uint32_t)TRACK_HISTORY_MIN_GAP_SECS * 1000);
+
+  memcpy(_hist_peer, contact.id.pub_key, PUB_KEY_SIZE);
+  _hist_tag = tag;
+  _hist_seq = 0;
+  _hist_pkts = 0;
+  _hist.start(_hist_cursor, req);
+  _hist_active = true;
+  _next_hist_pkt = futureMillis(0);   // first packet on the next pass of the loop
+  // Generous: four times as long as an answer that never has to retry anything takes.
+  _hist_deadline = futureMillis(4 * TRACK_HISTORY_MAX_PKTS * TRACK_HISTORY_GAP_MS);
+
+  MESH_DEBUG_PRINTLN("startHistoryQuery: since=%d every %ds or %dm, %d samples held",
+                     (uint32_t)req.since, (uint32_t)req.every_secs, (uint32_t)req.every_metres,
+                     (uint32_t)_hist.count());
+}
+
+void MyMesh::checkHistoryResponse() {
+  if (!_hist_active) return;
+
+  // An answer that cannot make progress has to end anyway. The retry below is for a
+  // packet pool that is momentarily empty; without a deadline a pool that stays empty
+  // would leave this armed for good, and hasPendingWork() would report work forever -
+  // which on a battery node means it never sleeps again.
+  if (millisHasNowPassed(_hist_deadline)) {
+    MESH_DEBUG_PRINTLN("checkHistoryResponse: answer gave up after seq=%d", (uint32_t)_hist_seq);
+    _hist_active = false;
+    return;
+  }
+
+  if (!millisHasNowPassed(_next_hist_pkt)) return;
+
+  ContactInfo* peer = lookupContactByPubKey(_hist_peer, PUB_KEY_SIZE);
+  if (peer == NULL) {   // removed from contacts while we were answering
+    _hist_active = false;
+    return;
+  }
+
+  // Selected into a COPY of the cursor. Nothing is consumed until the packet holding it
+  // has actually been handed to the radio - an empty packet pool must cost a retry, not
+  // the samples that were going to be in it.
+  PositionHistory::Cursor next_cursor = _hist_cursor;
+  PositionSample selected[PositionReport::capacityFor(POS_HIST_REPORT_BUDGET)];
+  int n = _hist.next(next_cursor, selected, (int)(sizeof(selected) / sizeof(selected[0])));
+
+  uint8_t blob[POS_HIST_RESP_MAX];
+  int i = 0;
+  memcpy(&blob[i], &_hist_tag, 4); i += 4;   // echoed so the asker can match the answer
+  blob[i++] = RESP_TYPE_POSITION_HISTORY;
+  blob[i++] = _hist_seq;
+  int flags_pos = i++;
+  uint8_t* nonce = &blob[i]; i += POS_NONCE_LEN;   // in the clear: the asker needs it
+
+  int report_len = 0;
+  if (n > 0) {
+    int consumed = 0;
+    report_len = PositionReport::encode(&blob[i], POS_HIST_REPORT_BUDGET, self_id.pub_key,
+                                        selected, n, &consumed);
+    if (report_len <= 0) {   // budget too small to hold even a header: a build-time fault
+      MESH_DEBUG_PRINTLN("checkHistoryResponse: no room to encode, abandoning the answer");
+      _hist_active = false;
+      return;
+    }
+    if (consumed < n) {
+      // The report format carries each position as a delta on the one before it, which
+      // covers about 3.6 km and 18 hours; a coarse downsample can step further than that
+      // and end the report early. Re-select exactly what went in, so the rest is offered
+      // again in the next packet rather than being dropped on the floor. The ring cannot
+      // have changed since the selection a few lines up, so this yields the same samples.
+      next_cursor = _hist_cursor;
+      _hist.next(next_cursor, selected, consumed);
+    }
+  }
+
+  bool finished = (n == 0) || _hist.isFinished(next_cursor);
+  bool capped = !finished && (_hist_pkts + 1 >= TRACK_HISTORY_MAX_PKTS);
+
+  blob[flags_pos] = ((finished || capped) ? POS_HIST_FLAG_LAST : 0)
+                  | ((capped || next_cursor.lost) ? POS_HIST_FLAG_TRUNCATED : 0);
+
+  // Whitened for the same reason a report is, and with the same construction: the packet
+  // is already sealed to this pair of contacts, and this second layer is what keeps it
+  // readable only inside the tracking group.
+  PositionReport::deriveNonce(_track_channel.secret, &blob[i], report_len, nonce);
+  PositionReport::whiten(_track_channel.secret, nonce, &blob[i], report_len);
+
+  mesh::Packet* pkt = createDatagram(PAYLOAD_TYPE_RESPONSE, peer->id,
+                                     peer->getSharedSecret(self_id), blob, i + report_len);
+  if (pkt == NULL) {   // pool empty: keep the cursor where it is and try again shortly
+    _next_hist_pkt = futureMillis(TRACK_HISTORY_GAP_MS);
+    return;
+  }
+
+  if (peer->out_path_len != OUT_PATH_UNKNOWN) {
+    sendDirect(pkt, peer->out_path, peer->out_path_len);
+  } else {
+    sendFloodScoped(*peer, pkt);
+  }
+
+  _hist_cursor = next_cursor;   // committed, now that the samples are on their way
+  _hist_seq++;
+  _hist_pkts++;
+
+  if (finished || capped) {
+    _hist_active = false;
+  } else {
+    _next_hist_pkt = futureMillis(TRACK_HISTORY_GAP_MS);
+  }
+}
+
+#endif   // TRACK_HISTORY > 0
 #endif   // TRACKING_KEY
 
 // The two position-reporting settings are carried as custom variables, the same generic
@@ -2869,5 +3070,9 @@ void MyMesh::checkAutoAdverts() {
 
 // To check if there is pending work
 bool MyMesh::hasPendingWork() const {
-  return _mgr->getOutboundTotal() > 0 || dirty_contacts_expiry != 0;
+  return _mgr->getOutboundTotal() > 0 || dirty_contacts_expiry != 0
+#if defined(TRACKING_KEY) && TRACK_HISTORY > 0
+      || _hist_active   // an answer with packets still to send is work, not idleness
+#endif
+      ;
 }

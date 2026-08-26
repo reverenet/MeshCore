@@ -113,6 +113,47 @@
   #define TRACK_PEERS                   16
 #endif
 
+// ---------------------------------------------------------------- position history
+//
+// Answering one contact's question "where have you been since <instant>?" - see
+// src/helpers/PositionHistory.h for the request and response on the wire.
+//
+// The reports above are a broadcast on a fixed cadence; this is a reply to a direct
+// question, sent only to the contact that asked and only when they hold the tracking key
+// as well. It costs no extra sampling: it is answered from a ring of the samples the node
+// has already taken, which means it follows the same switch reporting does. A node with
+// TRACK_REPORT off is not sampling, so it has nothing to answer with - which is the
+// intended answer for a node told not to say where it is.
+#ifndef TRACK_HISTORY
+  // Samples kept to answer with, 12 bytes of RAM each. 0 compiles the whole feature out,
+  // and a node that cannot answer simply does not - it is a request type it has never
+  // heard of, which is what every other node on the mesh already thinks of it.
+  //
+  // At the 60s sampling floor this is about four hours of continuous movement, and far
+  // longer than that for a node that spends most of its time parked, because the sampler
+  // backs off to an hour when it is not moving.
+  #define TRACK_HISTORY                 256
+#endif
+#ifndef TRACK_HISTORY_MAX_PKTS
+  // Most packets one answer may take. A cap belongs here rather than in the request
+  // because the airtime is spent by this node, on a shared channel, at the say-so of
+  // somebody else: an answer that runs to hundreds of packets is a denial of service with
+  // extra steps. What is left over is flagged as truncated, and the asker can come back
+  // for it with a later 'since'.
+  #define TRACK_HISTORY_MAX_PKTS        6
+#endif
+#ifndef TRACK_HISTORY_GAP_MS
+  // Spacing between the packets of one answer. Back-to-back sends would hold the channel
+  // for the whole answer and stamp on anything else trying to use it.
+  #define TRACK_HISTORY_GAP_MS          3000
+#endif
+#ifndef TRACK_HISTORY_MIN_GAP_SECS
+  // Least time between the STARTS of two answers, whoever asked. Without it a captured
+  // request replayed in a loop turns this node into a transmitter: the tracking key check
+  // stops a stranger asking, but it does not stop the same valid request being sent again.
+  #define TRACK_HISTORY_MIN_GAP_SECS    15
+#endif
+
 // ---------------------------------------------------------------- forwarding
 //
 // Max hops an advert may accumulate before a repeat-enabled companion stops forwarding
