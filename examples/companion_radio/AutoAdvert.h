@@ -113,6 +113,30 @@
   #define TRACK_PEERS                   16
 #endif
 
+#ifndef TRACK_PUSH_REPORTS
+  // Whether a report that arrives is also handed to the connected client, still encrypted,
+  // as PUSH_CODE_TRACK_REPORT.
+  //
+  // Without this a batch of positions collapses to one point. handleTrackReport keeps the
+  // newest sample and writes it to the sender's contact record, because that is the only
+  // place a position can go without the app knowing anything new - and a contact record
+  // holds one position. Every sample before the last is decoded, checked, and dropped. A
+  // node reporting every 900s therefore draws one point every 900s on a client's map, no
+  // matter how much of a trail was in the packet.
+  //
+  // With it, the report goes up exactly as it came off the air - nonce and all - and a
+  // client holding the tracking key decodes the whole batch:
+  //
+  //   [0x91][snr x4 1][rssi 1][path_len 1][pubkey prefix 6][nonce 8][whitened report]
+  //
+  // path_len is 0xFF when the report did not arrive by flood. The prefix says who is
+  // reporting without the client having to decrypt anything to find out. That is the same decoding a
+  // position history answer needs, so a client implements it once and uses it for both.
+  // A client without the key sees a frame code it does not know and ignores it, and the
+  // contact record is updated either way.
+  #define TRACK_PUSH_REPORTS            1
+#endif
+
 // ---------------------------------------------------------------- position history
 //
 // Answering one contact's question "where have you been since <instant>?" - see

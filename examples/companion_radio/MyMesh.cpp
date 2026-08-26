@@ -138,6 +138,7 @@
 #define PUSH_CODE_CONTROL_DATA          0x8E   // v8+
 #define PUSH_CODE_CONTACT_DELETED       0x8F // used to notify client app of deleted contact when overwriting oldest
 #define PUSH_CODE_CONTACTS_FULL         0x90 // used to notify client app that contacts storage is full
+#define PUSH_CODE_TRACK_REPORT          0x91 // a position report, as received - see TRACK_PUSH_REPORTS
 
 #define ERR_CODE_UNSUPPORTED_CMD        1
 #define ERR_CODE_NOT_FOUND              2
@@ -630,7 +631,7 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
   // the tracking secret, so it came from inside the group and is ours to swallow.
   if (isTrackingChannel(channel)) {
     if (data_type == POSITION_REPORT_DATA_TYPE) {
-      handleTrackReport(data, data_len);
+      handleTrackReport(pkt, data, data_len);
     } else {
       MESH_DEBUG_PRINTLN("onChannelDataRecv: dropping type=%d on the tracking channel",
                          (uint32_t)data_type);
@@ -2638,7 +2639,7 @@ bool MyMesh::isNewerTrackReport(const uint8_t* prefix, uint32_t timestamp) {
   return true;
 }
 
-bool MyMesh::handleTrackReport(const uint8_t* data, size_t data_len) {
+bool MyMesh::handleTrackReport(mesh::Packet* pkt, const uint8_t* data, size_t data_len) {
   uint8_t prefix[POS_PREFIX_LEN];
   PositionSample samples[PositionReport::capacityFor(MAX_GROUP_DATA_LENGTH)];
 
@@ -2708,6 +2709,41 @@ bool MyMesh::handleTrackReport(const uint8_t* data, size_t data_len) {
   from->gps_lat = newest.lat_e6;
   from->gps_lon = newest.lon_e6;
   from->lastmod = getRTCClock()->getCurrentTime();
+
+#if TRACK_PUSH_REPORTS
+  // The contact record above holds the newest position and nothing else, so on its own it
+  // turns a batch into a single point - a node reporting every 900s draws one point every
+  // 900s, whatever trail was in the packet. Hand the report itself to the client as well,
+  // exactly as it came off the air, and let something that holds the tracking key make
+  // sense of all of it.
+  //
+  // Still whitened, and with its nonce, so this is the same shape a position history
+  // answer arrives in and a client decodes both with one piece of code. The prefix is
+  // repeated in the clear ahead of it - it is inside the report too, but a client should
+  // not have to decrypt a frame to find out whose it is.
+  //
+  // Only when the client is actually there. There is no offline queue for these: that
+  // queue is for messages a person will read later, and a trail nobody was listening for
+  // is what the position history request exists to go back and fetch.
+  if (_serial->isConnected()) {
+    const size_t frame_len = 4 + POS_PREFIX_LEN + data_len;
+    if (frame_len > MAX_FRAME_SIZE) {
+      // Cannot happen with a report this firmware built - they top out well inside the
+      // frame - but data_len arrives off the air, and a frame that does not fit must be
+      // dropped here rather than written past the end of out_frame.
+      MESH_DEBUG_PRINTLN("handleTrackReport: report too long to push, len=%d", (uint32_t)data_len);
+    } else {
+      int i = 0;
+      out_frame[i++] = PUSH_CODE_TRACK_REPORT;
+      out_frame[i++] = (int8_t)(pkt->getSNR() * 4);
+      out_frame[i++] = (int8_t)(_radio->getLastRSSI());
+      out_frame[i++] = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
+      memcpy(&out_frame[i], prefix, POS_PREFIX_LEN); i += POS_PREFIX_LEN;
+      memcpy(&out_frame[i], data, data_len); i += (int)data_len;
+      _serial->writeFrame(out_frame, i);
+    }
+  }
+#endif
 
   // Tell the app the contact changed. Bumping lastmod is not enough on its own: the
   // client only re-reads contacts when something prompts it to, and with no prompt the

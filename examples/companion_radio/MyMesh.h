@@ -244,7 +244,7 @@ private:
   void setTrackReport(bool enable);
   void setTrackInterval(uint32_t secs);
   void flushTrackReport();
-  bool handleTrackReport(const uint8_t* data, size_t data_len);
+  bool handleTrackReport(mesh::Packet* pkt, const uint8_t* data, size_t data_len);
   bool isNewerTrackReport(const uint8_t* prefix, uint32_t timestamp);
 
 #if TRACK_HISTORY > 0
