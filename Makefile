@@ -139,13 +139,19 @@ ARGUMENTS
                 when the target has none.
 
  network profile - radio and regions
-  CONFIG        profile to read, as NAME = VALUE lines. Default is configs/reverenet.conf
-                under REVERENET_HOME, and a missing default warns and builds the stock
-                per-variant settings; a file named explicitly has to exist. CONFIG=
-                (empty) asks for the stock settings and says nothing. Values in the file
-                are defaults, so passing the same name to make overrides one line without
-                editing it. Keys are rejected there on purpose - a profile gets shared.
-                examples/configs/sample.conf lists every setting one can carry.
+  CONFIG_DIR    where the network's profiles live, one per kind of node: companion.conf,
+                repeater.conf, room_server.conf, sensor.conf, terminal.conf,
+                kiss_modem.conf. Which one is read follows from FIRMWARE, so a build needs
+                no more than its target name. Default is configs/ under REVERENET_HOME. A
+                missing profile warns and builds the stock per-variant settings, because a
+                fresh clone should still build - CONFIG_DIR= (empty) asks for those and
+                says nothing. examples/configs/sample.conf lists every setting one can
+                carry, and is what to copy for a new network.
+  CONFIG        one profile file, named outright, skipping the lookup - for a build that
+                does not fit the scheme. Unlike a profile found by kind, a file named here
+                has to exist. Values in a profile are defaults, so passing the same name
+                to make overrides one line without editing it. Keys are rejected in a
+                profile on purpose: it gets shared.
   LORA_FREQ     MHz. These four must match the rest of the network exactly. A node that
   LORA_BW       kHz. differs on frequency, bandwidth or spreading factor simply never
   LORA_SF       5-12. hears the mesh, with nothing to indicate why.
@@ -319,7 +325,7 @@ STRING_ARGS := DEFAULT_REGIONS DEFAULT_FLOOD_SCOPE_NAME
 # also renames a board that has been named already - something the compiled-in default
 # cannot do. See the flash recipe.
 BUILD_ARGS := $(NUMERIC_ARGS) $(RADIO_ARGS) $(STRING_ARGS) \
-  BLE_PIN BLE_PIN_CODE BLE_PIN_FILE CONFIG AUTO_ADVERT_LOC_POLICY \
+  BLE_PIN BLE_PIN_CODE BLE_PIN_FILE CONFIG CONFIG_DIR AUTO_ADVERT_LOC_POLICY \
   TRACKING_KEY TRACKING_KEY_FILE KEYS_DIR CHANNELS CHANNELS_KEY_FILE REVERENET_HOME
 CMDLINE_BUILD_ARGS = $(strip $(foreach v,$(BUILD_ARGS),\
   $(if $(filter command line,$(origin $(v))),$(v))))
@@ -345,7 +351,7 @@ not_a_decimal = $(shell printf %s '$(1)' | grep -qE '^[0-9]+(\.[0-9]+)?$$' || ec
 #
 # So they live outside the tree, under REVERENET_HOME:
 #
-#   $(REVERENET_HOME)/configs/<network>.conf     what a network is
+#   $(REVERENET_HOME)/configs/<kind>.conf        what a network asks of that kind of node
 #   $(REVERENET_HOME)/keys/tracking.key          who may read a position
 #   $(REVERENET_HOME)/keys/channels.key          one key per channel in CHANNELS
 #   $(REVERENET_HOME)/keys/ble.pin               the pairing pin
@@ -359,13 +365,60 @@ REVERENET_HOME ?= $(HOME)/.reverenet
 
 # --------------------------------------------------------------- network config file
 
-# A network profile: radio settings and repeater regions, as NAME = VALUE lines. These
-# are defaults, so anything passed to make overrides the file without editing it.
-# CONFIG= (empty) builds the stock per-variant settings instead.
-CONFIG ?= $(REVERENET_HOME)/configs/reverenet.conf
+# A network profile: radio settings, regions, channels, as NAME = VALUE lines. These are
+# defaults, so anything passed to make overrides the file without editing it.
+#
+# One profile per KIND of node rather than one per network, because what a network asks
+# of a repeater and what it asks of a companion barely overlap: a repeater has regions and
+# no channels, a companion has channels, tracking and adverts and no regions. A single
+# file for both is most of a file that does not apply, and every setting in it needs a
+# note saying which builds read it.
+#
+#   $(CONFIG_DIR)/companion.conf     built for anything with 'companion' in its name
+#   $(CONFIG_DIR)/repeater.conf      ... 'repeater', including the bridge variants
+#   $(CONFIG_DIR)/room_server.conf   ... and so on for room_server, sensor, terminal
+#
+# The radio settings appear in each of them and have to agree - see the check further
+# down, which is the price of splitting them up.
+CONFIG_DIR ?= $(REVERENET_HOME)/configs
 
-# Whether CONFIG is the default or was asked for, which decides what a missing file means.
-CONFIG_IS_DEFAULT := $(if $(filter command line environment,$(origin CONFIG)),,1)
+# CONFIG names one profile outright, for a build that does not fit the scheme - a bench
+# node on another frequency, or a file somebody sent over. It skips the lookup entirely,
+# and unlike a profile found by kind, a file named here has to exist.
+CONFIG ?=
+
+# Which profile a target wants, taken from its name: RAK_4631_companion_radio_ble is a
+# companion, Ebyte_EoRa-S3_Repeater is a repeater (lowercased first - some variants spell
+# it with a capital), repeater_bridge_espnow is still a repeater. A substring rather than
+# a suffix, because the kind is not always the last word.
+#
+# NOTE: a shell 'case' cannot go here. Its patterns end in ')', and make counts
+# parentheses inside $(shell ...) - the first one would end the call, not the pattern.
+NODE_KINDS := companion room_server repeater sensor terminal kiss_modem
+NODE_KIND := $(shell printf %s '$(FIRMWARE)' | tr 'A-Z' 'a-z' \
+               | grep -oE '$(subst $() ,|,$(NODE_KINDS))' | head -1)
+
+ifneq ($(strip $(CONFIG)),)
+  ifeq ($(wildcard $(CONFIG)),)
+    $(error CONFIG=$(CONFIG) does not exist)
+  endif
+else ifneq ($(strip $(CONFIG_DIR)),)
+  ifneq ($(NODE_KIND),)
+    CONFIG := $(CONFIG_DIR)/$(NODE_KIND).conf
+    ifeq ($(wildcard $(CONFIG)),)
+      # Not an error: a fresh clone with no profiles should still build. Not silent
+      # either - a node built on stock radio settings cannot hear the network it was
+      # meant for, and nothing about it says why. CONFIG= asks for stock and means it.
+      $(warning no profile for a $(NODE_KIND) at $(CONFIG) - building the stock \
+                per-variant settings. Copy examples/configs/sample.conf there, or set \
+                CONFIG_DIR, or pass CONFIG= to say you meant the stock ones)
+      CONFIG :=
+    endif
+  else ifneq ($(strip $(FIRMWARE)),)
+    $(warning $(FIRMWARE) is not a kind of node with a profile - building the stock \
+              per-variant settings. Name one with CONFIG=<file> if it needs one)
+  endif
+endif
 
 CONFIG_ARGS := $(RADIO_ARGS) $(STRING_ARGS) $(NUMERIC_ARGS) AUTO_ADVERT_LOC_POLICY CHANNELS
 
@@ -406,6 +459,23 @@ endif
 
 $(foreach v,$(RADIO_ARGS),$(if $($(v)),$(if $(call not_a_decimal,$($(v))),\
   $(error $(v) must be a number, got '$($(v))'))))
+
+# One profile per kind of node means the radio settings are written down more than once,
+# and settings that must agree and are kept in two places are settings that eventually
+# disagree. A node built on the wrong spreading factor does not hear the mesh and says
+# nothing about why, so it is worth the four greps to notice here instead.
+#
+# A warning rather than an error: a bench profile deliberately on another frequency is a
+# real thing to want, and stopping the build over it would be worse than saying so.
+PROFILE_FILES := $(wildcard $(foreach k,$(NODE_KINDS),$(CONFIG_DIR)/$(k).conf))
+profile_values = $(shell sed -n 's/^[[:space:]]*$(1)[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*/\1/p' \
+                   $(PROFILE_FILES) 2>/dev/null | sort -u)
+ifneq ($(words $(PROFILE_FILES)),1)
+  $(foreach v,LORA_FREQ LORA_BW LORA_SF LORA_CR,\
+    $(if $(word 2,$(call profile_values,$(v))),\
+      $(warning the profiles in $(CONFIG_DIR) disagree on $(v): \
+                $(call profile_values,$(v)) - nodes that differ on it cannot hear each other)))
+endif
 
 # The device's own name, so a board can be flashed ready-labelled. Kept out of the config
 # file deliberately: a name identifies one device, a config file describes a network.
@@ -585,6 +655,16 @@ endif
 # does the resolving; it answers in one line so this works on make 3.81, which cannot see
 # the exit status of a $(shell).
 CHANNEL_NAMES := $(subst $(comma), ,$(CHANNELS))
+
+# 'make keys' builds nothing, so no target has said which profile applies and CHANNELS is
+# not set by one. The channels of a network are whatever its profiles name, so take the
+# union of all of them: a key file that covers every channel anybody builds for is the
+# only one worth generating. A CHANNELS= on the command line still wins, for generating
+# the key of one channel on its own.
+ALL_PROFILE_CHANNELS := $(sort $(subst $(comma), ,\
+  $(shell sed -n 's/^[[:space:]]*CHANNELS[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*/\1/p' \
+    $(PROFILE_FILES) 2>/dev/null)))
+KEYS_CHANNELS := $(if $(CHANNELS),$(CHANNELS),$(subst $() ,$(comma),$(strip $(ALL_PROFILE_CHANNELS))))
 
 ifneq ($(strip $(CHANNELS)),)
   # The name is compiled into a string flag and shown in the app, so it may not carry a
@@ -787,7 +867,8 @@ export ABOUT_firmware ABOUT_flash ABOUT_erase ABOUT_erase_firmware ABOUT_detect 
 
 # Which settings each command reads. Everything that changes the binary is grouped, since
 # the commands that build read all of it and the commands that do not read none of it.
-BUILD_SETTINGS := NAME REVERENET_HOME BLE_PIN BLE_PIN_FILE CONFIG $(RADIO_ARGS) $(STRING_ARGS) \
+BUILD_SETTINGS := NAME REVERENET_HOME BLE_PIN BLE_PIN_FILE CONFIG_DIR CONFIG \
+  $(RADIO_ARGS) $(STRING_ARGS) \
   TRACKING_KEY TRACKING_KEY_FILE KEYS_DIR CHANNELS CHANNELS_KEY_FILE \
   GPS_ENABLED GPS_INTERVAL \
   TRACK_REPORT TRACK_REPORT_SECS TRACK_SAMPLE_MIN_SECS TRACK_SAMPLE_MAX_SECS \
@@ -805,7 +886,7 @@ SETTINGS_erase          := FIRMWARE VERSION BINARIES_DIR ERASE_UF2 PORT YES
 SETTINGS_erase_firmware := FIRMWARE VERSION BINARIES_DIR
 SETTINGS_name           := NAME PORT YES
 SETTINGS_detect         := PORT
-SETTINGS_keys           := REVERENET_HOME KEYS_DIR TRACKING_KEY_FILE BLE_PIN_FILE CHANNELS CHANNELS_KEY_FILE CONFIG
+SETTINGS_keys           := REVERENET_HOME KEYS_DIR TRACKING_KEY_FILE BLE_PIN_FILE KEYS_CHANNELS CHANNELS_KEY_FILE CONFIG_DIR
 SETTINGS_flags          := $(BUILD_SETTINGS)
 SETTINGS_firmwares      := MATCH
 SETTINGS_list           := MATCH
@@ -835,7 +916,8 @@ MEANS_MATCH         := every target is listed
 MEANS_NAME          := the board keeps the name it has - a fresh one names itself
 MEANS_BLE_PIN       := the pin file if it exists - else the variant pin, or one per boot
 MEANS_BLE_PIN_FILE  := read when it exists - missing is not an error
-MEANS_CONFIG        := reverenet.conf under REVERENET_HOME - CONFIG= builds stock settings
+MEANS_CONFIG        := the profile for what is being built, from CONFIG_DIR
+MEANS_CONFIG_DIR    := configs/ under REVERENET_HOME - one profile per kind of node
 MEANS_LORA_FREQ     := from the config file - the variant setting without one
 MEANS_LORA_BW       := from the config file - the variant setting without one
 MEANS_LORA_SF       := from the config file - the variant setting without one
@@ -848,6 +930,7 @@ MEANS_TRACKING_KEY_FILE := read when it exists - missing is not an error
 MEANS_REVERENET_HOME := where this network's profile and its keys live, outside the checkout
 MEANS_KEYS_DIR      := where make keys writes and the key files are looked for
 MEANS_CHANNELS      := only the built-in Public channel - the app adds the rest by hand
+MEANS_KEYS_CHANNELS := every channel named by any profile in CONFIG_DIR
 MEANS_CHANNELS_KEY_FILE := where the key for each channel in CHANNELS is read from
 MEANS_GPS_ENABLED   := firmware default - on for a companion off for a repeater
 MEANS_GPS_INTERVAL  := firmware default 0 - the sensor cadence of once a second
@@ -884,7 +967,7 @@ MEANS_erase_firmware_FIRMWARE := required - the target to build the erase image 
 MEANS_erase_firmware_VERSION  := required - baked in like any other build
 MEANS_flash_VERSION           := only needed if nothing is built and it has to build
 MEANS_erase_VERSION           := only needed if no erase image exists and it has to build
-MEANS_flags_CONFIG            := reverenet.conf under REVERENET_HOME - where these come from
+MEANS_flags_CONFIG            := the profile for FIRMWARE - name one to override the lookup
 MEANS_flash_NAME              := every image built for the board is offered - and none is preferred
 MEANS_name_NAME               := required - the name to write to the attached board
 MEANS_firmware_NAME           := no name compiled in - a comma-separated list builds one each
@@ -1052,11 +1135,11 @@ keys: $(TRACKING_KEY_FILE)
 # Channel keys are per channel and the file is edited by hand as often as it is generated,
 # so this fills in what is missing rather than owning the file: a channel that already has
 # a key keeps it, for the same reason the tracking key is never rewritten.
-ifneq ($(strip $(CHANNELS)),)
+ifneq ($(strip $(KEYS_CHANNELS)),)
 	@echo
-	@tools/channel_keys.sh generate '$(CHANNELS_KEY_FILE)' '$(CHANNELS)'
+	@tools/channel_keys.sh generate '$(CHANNELS_KEY_FILE)' '$(KEYS_CHANNELS)'
 	@echo "channel keys:  $(CHANNELS_KEY_FILE)"
-	@tools/channel_keys.sh print '$(CHANNELS_KEY_FILE)' '$(CHANNELS)'
+	@tools/channel_keys.sh print '$(CHANNELS_KEY_FILE)' '$(KEYS_CHANNELS)'
 	@echo "copy it to every node on these channels, then compare fingerprints"
 endif
 

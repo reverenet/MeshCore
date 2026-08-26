@@ -21,8 +21,10 @@ platformio.local.ini
 # now - ~/.reverenet by default - and none of it belongs in a checkout. These stay as a
 # backstop for a directory left over from before that move, or one made by hand: a key
 # that has been committed is not a key any more, and a profile names a real network.
-keys/
-configs/
+# Anchored to the repo root on purpose: unanchored, 'configs/' also matches
+# examples/configs, where the sample profile lives and is meant to be committed.
+/keys/
+/configs/
 *.key
 *.pin
 # erase images are downloaded per board, not built here - see the README in that dir
